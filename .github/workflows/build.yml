@@ -1,0 +1,167 @@
+name: Build DSH Android (Soul 定制)
+
+# 阶段 0：先把流水线跑通，产出「和现在一模一样」的 APK
+# 不依赖作者的 DSH_DEV_HOME 开发环境树 —— 那个 130MB 的 payload 直接从官方
+# release APK 里抽 assets/payload.zip，等价于 build.sh 的第 0/7 步产物。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '源码 ref（tag 或分支）'
+        required: true
+        default: 'v1.15.2'
+      official_tag:
+        description: '抽取 payload 用的官方 release tag'
+        required: true
+        default: 'v1.15.2'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 取出源码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 1
+
+      - name: 装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 准备 Android 工具（aapt / d8 / zipalign / apksigner / android.jar）
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$ANDROID_HOME  SDK=$SDK"
+          BT="$(ls "$SDK/build-tools" | sort -V | tail -1)"
+          PLAT="$(ls "$SDK/platforms" | sort -V | tail -1)"
+          echo "build-tools=$BT   platform=$PLAT"
+          echo "$SDK/build-tools/$BT" >> "$GITHUB_PATH"
+          echo "ANDROID_JAR=$SDK/platforms/$PLAT/android.jar" >> "$GITHUB_ENV"
+          export PATH="$SDK/build-tools/$BT:$PATH"
+          for t in aapt zipalign apksigner d8; do
+            command -v "$t" >/dev/null || { echo "!! 缺少 $t"; exit 1; }
+          done
+          aapt version && d8 --version
+          ls -la "$SDK/platforms/$PLAT/android.jar"
+
+      - name: 取官方 payload（等价于 build.sh 的 0/7，跳过 130MB 组装）
+        run: |
+          TAG="${{ github.event.inputs.official_tag }}"
+          URL="https://github.com/woaiys3/deepseek-harness-android-app/releases/download/${TAG}/DeepSeekHarness-compat-${TAG}.apk"
+          echo "下载官方 APK：$URL"
+          curl -fSL --retry 5 --retry-delay 5 --retry-all-errors -o /tmp/official.apk "$URL"
+          ls -la /tmp/official.apk
+          echo "官方 APK 里的 payload.zip："
+          unzip -l /tmp/official.apk | grep payload.zip
+          unzip -p /tmp/official.apk assets/payload.zip > /tmp/payload.zip
+          ls -la /tmp/payload.zip
+          mkdir -p android-app/staging
+          ( cd android-app/staging && unzip -q /tmp/payload.zip )
+          echo "--- staging 顶层 ---"; ls -la android-app/staging
+          du -sh android-app/staging
+
+      - name: 取回已有 keystore
+        id: kscache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/dsh-ks
+          key: dsh-release-keystore-v1
+
+      - name: 生成或复用 keystore
+        run: |
+          mkdir -p "$RUNNER_TEMP/dsh-ks"
+          KS="$RUNNER_TEMP/dsh-ks/release.jks"
+          if [ -f "$KS" ]; then
+            echo "♻️ 复用已有 keystore（签名一致，后续可直接覆盖安装）"
+          else
+            echo "🆕 首次生成 keystore"
+            keytool -genkeypair -v -keystore "$KS" -alias dsh \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass dshpass1234 -keypass dshpass1234 \
+              -dname "CN=DSH Custom, OU=Self, O=Self, L=NA, ST=NA, C=CN"
+          fi
+
+      - name: 编译打包（照搬 build.sh 的 1/7 ~ 7/7）
+        env:
+          KEYSTORE_PASS: dshpass1234
+          KEYSTORE_ALIAS: dsh
+        run: |
+          set -e
+          cd android-app
+          P="$PWD"
+          AJ="$ANDROID_JAR"
+          KEY="$RUNNER_TEMP/dsh-ks/release.jks"
+          echo "AJ=$AJ"
+
+          rm -rf out assets
+          mkdir -p out/gen out/classes out/dex assets
+
+          echo "== 1/7 资源编译 (aapt) =="
+          aapt package -f -m -J out/gen -M AndroidManifest.xml -S res -I "$AJ"
+          ls out/gen/com/deepseek/harness/
+
+          echo "== 2/7 javac =="
+          SHIZUKU_CLS="$P/out/shizuku-cls"
+          rm -rf "$SHIZUKU_CLS"; mkdir -p "$SHIZUKU_CLS"
+          for AAR in libs/shizuku-api.aar libs/shizuku-provider.aar libs/shizuku-aidl.aar; do
+            TMP="$P/out/$(basename "$AAR" .aar)"
+            rm -rf "$TMP"; mkdir -p "$TMP"
+            ( cd "$TMP" && jar xf "$P/$AAR" classes.jar )
+            ( cd "$SHIZUKU_CLS" && jar xf "$TMP/classes.jar" )
+          done
+          SHIZUKU_JARS="$P/out/shizuku-api/classes.jar:$P/out/shizuku-provider/classes.jar:$P/out/shizuku-aidl/classes.jar"
+          javac -source 1.8 -target 1.8 -bootclasspath "$AJ" \
+            -classpath "$P/out/gen:$SHIZUKU_JARS" -d "$P/out/classes" \
+            src/com/deepseek/harness/MainActivity.java \
+            src/com/deepseek/harness/EngineService.java \
+            src/com/deepseek/harness/AlarmReceiver.java \
+            src/com/deepseek/harness/ScheduleExecutor.java \
+            src/com/deepseek/harness/OverlayService.java \
+            src/com/deepseek/harness/UsageStatsHelper.java \
+            src/com/deepseek/harness/AccessibilityService.java \
+            src/com/deepseek/harness/VsreenBridgeService.java \
+            src/com/deepseek/harness/LogShareProvider.java \
+            src/com/deepseek/harness/vscreen/*.java \
+            out/gen/com/deepseek/harness/R.java
+          NCLASS="$(find "$P/out/classes" -name '*.class' | wc -l)"
+          echo "  javac 完成，class 数：$NCLASS"
+          [ "$NCLASS" -gt 0 ] || { echo "!! javac 产物为空"; exit 1; }
+
+          echo "== 3/7 d8 -> dex =="
+          { find "$P/out/classes" -name '*.class'; find "$SHIZUKU_CLS" -name '*.class'; } > "$P/out/classes.rsp"
+          d8 --release --lib "$AJ" --min-api 24 --output "$P/out/dex" @"$P/out/classes.rsp"
+          grep -aq "MainActivity" "$P/out/dex/classes.dex" || { echo "!! classes.dex 缺少 MainActivity"; exit 1; }
+          echo "  classes.dex $(stat -c%s "$P/out/dex/classes.dex") bytes"
+
+          echo "== 打包 payload.zip（staging -> assets）=="
+          ( cd staging && jar cMf "$P/assets/payload.zip" . )
+          ls -la "$P/assets/payload.zip"
+
+          echo "== 4/7 aapt 打包 + assets =="
+          aapt package -f -M AndroidManifest.xml -S res -I "$AJ" -A assets -0 zip -F "$P/out/unsigned.apk"
+          ( cd "$P/out/dex" && aapt add "$P/out/unsigned.apk" classes.dex )
+
+          echo "== 5/7 zipalign =="
+          zipalign -f 4 "$P/out/unsigned.apk" "$P/out/aligned.apk"
+
+          echo "== 6/7 签名 =="
+          apksigner sign --ks "$KEY" --ks-pass "pass:$KEYSTORE_PASS" \
+            --ks-key-alias "$KEYSTORE_ALIAS" --key-pass "pass:$KEYSTORE_PASS" \
+            --out "$P/DeepSeekHarness.apk" "$P/out/aligned.apk"
+
+          echo "== 7/7 校验 =="
+          apksigner verify --print-certs "$P/DeepSeekHarness.apk"
+          aapt dump badging "$P/DeepSeekHarness.apk" | head -6
+          ls -la "$P/DeepSeekHarness.apk"
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-apk
+          path: android-app/DeepSeekHarness.apk
+          if-no-files-found: error
