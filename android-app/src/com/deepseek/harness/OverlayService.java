@@ -81,6 +81,14 @@ public class OverlayService extends Service {
     /** AI "已完成"提示在状态切换后保留的时长（毫秒）。 */
     private static final long FINISHED_TTL_MS = 60000L;
 
+    // v1.17：静置时是否把悬浮球半藏到屏幕外（旧行为 true）。
+    // 改成 false —— 球体颜色就是"AI 当前状态"的常驻信号，半藏会看不全。
+    private static final boolean TUCK_WHEN_IDLE = false;
+
+    // v1.17 自由停靠：悬浮球可以拖到屏幕任意位置看清楚，但这么久无操作后
+    // 自动滑回最近的边缘 —— 免得长期停在中间挡住 AI 的点击。
+    private static final long FREE_DWELL_MS = 30000L;
+
     /** 当前运行的 OverlayService 实例（供 MainActivity 前后台联动控制视图可见性）。 */
     private static OverlayService instance = null;
 
@@ -114,6 +122,10 @@ public class OverlayService extends Service {
     private volatile boolean userHidden = false;
     /** v1.13.11：悬浮图标当前吸附在右边？由拖动松手时的 snapToEdge() 决定。 */
     private boolean snappedRight = false;
+    private long lastTapAt = 0L;
+    private final Runnable dockRunnable = new Runnable() {
+        @Override public void run() { dockToEdge(); }
+    };
     /** v1.13.11：App 在前台 → 悬浮窗应隐藏（由 MainActivity.onStart/onStop 维护）。 */
     private volatile boolean foregroundWantsHidden = true;
     /** v1.13.11：被虚拟屏预览「收起到小鲸鱼」钉住 —— 只负责持续拉预览帧，不再影响可见性。 */
@@ -343,6 +355,15 @@ public class OverlayService extends Service {
                 switch (ev.getAction()) {
                     case MotionEvent.ACTION_DOWN:
                         downAt = System.currentTimeMillis();
+                        // 双击 = 立刻归位（不用等 30 秒）
+                        if (downAt - lastTapAt < 300L) {
+                            lastTapAt = 0L;
+                            dockToEdge();
+                            return true;
+                        }
+                        lastTapAt = downAt;
+                        // 任何触摸都重置"自动归位"倒计时
+                        handler.removeCallbacks(dockRunnable);
                         touchX = ev.getRawX(); touchY = ev.getRawY();
                         startX = lp.x; startY = lp.y;
                         dragging = false;
@@ -362,7 +383,13 @@ public class OverlayService extends Service {
                         if (dragging && dismissHint) {
                             hideByDragToBottom();
                         } else if (dragging) {
-                            snapToEdge();      // 拖完自动吸到最近的左右边缘（静置态=半藏）
+                            // v1.17：拖到哪就停在哪（方便看清楚），只起一个 30 秒的
+                            // 自动归位倒计时；本来就已经贴着边的就直接吸附，不用等。
+                            if (nearEdge()) {
+                                snapToEdge();
+                            } else {
+                                startFreeDwell();
+                            }
                             if (panelVisible) setPanelVisible(true, false);
                         } else if (System.currentTimeMillis() - downAt < 400) {
                             setPanelVisible(!panelVisible, true);
@@ -483,6 +510,39 @@ public class OverlayService extends Service {
      * v1.13.12：贴边 = 面板收起时把小鲸鱼**半藏**到屏幕边缘（露出约一半），
      * 面板展开时完整贴边（否则面板会被截掉）。
      */
+    /** 是否已经贴着左/右边缘（贴边就不用等倒计时，直接吸附）。 */
+    private boolean nearEdge() {
+        try {
+            if (lp == null || rootView == null) return true;
+            int screenW = getResources().getDisplayMetrics().widthPixels;
+            int w = rootView.getWidth() > 0 ? rootView.getWidth() : dp(60);
+            return lp.x <= dp(12) || lp.x + w >= screenW - dp(12);
+        } catch (Throwable t) {
+            return true;   // 判断不了就当贴边，走保守路径
+        }
+    }
+
+    /** 进入自由停靠态：FREE_DWELL_MS 内无操作就自动滑回边缘。 */
+    private void startFreeDwell() {
+        handler.removeCallbacks(dockRunnable);
+        handler.postDelayed(dockRunnable, FREE_DWELL_MS);
+    }
+
+    /**
+     * 立刻归位到最近的边缘。双击、倒计时到点、外部的 /overlay-dock 都走这里。
+     * 面板开着的话先收起来（收起时会自己滑回边缘），否则直接平滑滑过去。
+     */
+    private void dockToEdge() {
+        handler.removeCallbacks(dockRunnable);
+        try {
+            if (panelVisible) {
+                setPanelVisible(false, true);
+            } else {
+                animateToEdge();
+            }
+        } catch (Throwable ignored) {}
+    }
+
     private void snapToEdge() {
         try {
             if (lp == null || rootView == null) return;
@@ -503,7 +563,7 @@ public class OverlayService extends Service {
      */
     private int edgeXFor(int viewWidth) {
         int screenW = getResources().getDisplayMetrics().widthPixels;
-        boolean tucked = !panelVisible;
+        boolean tucked = !panelVisible && TUCK_WHEN_IDLE;
         if (tucked) {
             int off = Math.round(viewWidth * (1f - TUCK_VISIBLE_FRACTION));
             return snappedRight ? screenW - viewWidth + off : -off;
