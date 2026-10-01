@@ -1843,7 +1843,7 @@ public class MainActivity extends Activity {
         java.util.zip.ZipInputStream zis = null;
         try {
             zis = new java.util.zip.ZipInputStream(
-                    new java.io.BufferedInputStream(getAssets().open("payload.zip")));
+                    new java.io.BufferedInputStream(openPayloadZip()));
             java.util.zip.ZipEntry e;
             byte[] buf = new byte[16384];
             while ((e = zis.getNextEntry()) != null) {
@@ -1877,6 +1877,22 @@ public class MainActivity extends Activity {
             if (zis != null) { try { zis.close(); } catch (Throwable ignored) {} }
         }
         Log.i(TAG, "engine plugins refreshed from payload.zip, files=" + copied);
+    }
+
+    /**
+     * v1.17 免流量构建：APK 里可以不带 payload.zip（体积从 121MB 降到约 10MB），
+     * 这时退回到读外部投递的 /sdcard/DSH-payload.zip（内容与内置的完全一致）。
+     * 两条路都不通才抛异常，由各调用点原有的 catch (Throwable) 兜住、不崩。
+     */
+    private java.io.InputStream openPayloadZip() throws java.io.IOException {
+        try {
+            return getAssets().open("payload.zip");
+        } catch (Throwable ignored) {
+            // APK 内没带 → 走外部
+        }
+        File ext = new File(Environment.getExternalStorageDirectory(), "DSH-payload.zip");
+        Log.i(TAG, "payload.zip 不在 APK 内，改用外部文件: " + ext);
+        return new java.io.BufferedInputStream(new java.io.FileInputStream(ext));
     }
 
     private File extractVscreenDex() {
@@ -3189,7 +3205,7 @@ public class MainActivity extends Activity {
         // 「旧嵌套副本被 Node 优先解析」，现在只清插件层这一小块，不再动整棵树。
         java.util.HashSet<String> addPkgs = additive ? new java.util.HashSet<String>() : null;
         byte[] buf = new byte[128 * 1024];
-        InputStream in = getAssets().open("payload.zip");
+        InputStream in = openPayloadZip();
         ZipInputStream zis = new ZipInputStream(in);
         ZipEntry e;
         int processed = 0;
@@ -3397,7 +3413,7 @@ public class MainActivity extends Activity {
     // 重装后把 dshhome 的官方配置文件从 payload.zip 覆盖到内部（凭证/会话保留）。
     private void refreshInternalConfig(File payload) throws IOException {
         byte[] buf = new byte[128 * 1024];
-        InputStream in = getAssets().open("payload.zip");
+        InputStream in = openPayloadZip();
         ZipInputStream zis = new ZipInputStream(in);
         ZipEntry e;
         int updated = 0;
@@ -3435,7 +3451,7 @@ public class MainActivity extends Activity {
     private int countPayloadEntries(String mode) throws IOException {
         final boolean internalOnly = "internal".equals(mode) || "internal-patch".equals(mode);
         final boolean dshrootOnly = "dshroot".equals(mode) || "dshroot-add".equals(mode);
-        InputStream in = getAssets().open("payload.zip");
+        InputStream in = openPayloadZip();
         ZipInputStream zis = new ZipInputStream(in);
         ZipEntry e;
         int n = 0;
@@ -6448,7 +6464,7 @@ public class MainActivity extends Activity {
         final String prefix = "dshhome/profiles/web/";
         byte[] buf = new byte[64 * 1024];
         int n = 0;
-        ZipInputStream zis = new ZipInputStream(getAssets().open("payload.zip"));
+        ZipInputStream zis = new ZipInputStream(openPayloadZip());
         try {
             ZipEntry e;
             while ((e = zis.getNextEntry()) != null) {
