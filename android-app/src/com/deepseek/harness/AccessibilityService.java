@@ -58,6 +58,13 @@ public class AccessibilityService extends android.accessibilityservice.Accessibi
     public static volatile boolean isRunning = false;
     /** 当前活跃窗口的包名。 */
     public static volatile String activePackage = "";
+    /**
+     * v1.18：最近一次"用户触摸屏幕"的时间戳。
+     * 配置里订了 typeTouchInteractionStart/End，系统在手指按下/抬起时就会发，
+     * 不管用户在用哪个 App（游戏里也发）。用来判断"用户是不是正在操作手机" ——
+     * AI 要抢前台之前先看这个，用户正在操作就别打断他。
+     */
+    public static volatile long lastTouchAt = 0L;
 
     private static final int MAX_NODES = 250;
     private static final int MAX_DEPTH = 40;
@@ -118,8 +125,19 @@ public class AccessibilityService extends android.accessibilityservice.Accessibi
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event != null && event.getPackageName() != null) {
+        if (event == null) return;
+        if (event.getPackageName() != null) {
             activePackage = event.getPackageName().toString();
+        }
+        // v1.18：记触摸时间。除了专门的触摸事件，点击/滚动/输入也算"人在操作"
+        // （有些 ROM 不发 touch-interaction，这几个能兜底）。
+        int t = event.getEventType();
+        if (t == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START
+                || t == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END
+                || t == AccessibilityEvent.TYPE_VIEW_CLICKED
+                || t == AccessibilityEvent.TYPE_VIEW_SCROLLED
+                || t == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
+            lastTouchAt = System.currentTimeMillis();
         }
     }
 
