@@ -15,6 +15,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -57,6 +58,9 @@ import org.json.JSONObject;
  *     这是"会话正在工作"的一手证据，无需任何认证。
  */
 public class OverlayService extends Service {
+
+    /** 日志标签（v1.17 加，原版这个类不记日志）。 */
+    private static final String TAG = "DSHOverlay";
     /**
      * 三版本共存的默认引擎端口，按包名区分（与 AccessibilityService 的口径一致）：
      * 正式版 3080 / Lite 3082 / 兼容版 3084。通知端口 = 引擎端口 + 1，无障碍端口 = +101。
