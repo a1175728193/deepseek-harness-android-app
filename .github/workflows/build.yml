@@ -217,7 +217,7 @@ jobs:
               startStatusServer stopStatusServer handleStatusHit applyStatusPayload \
               effectiveState stepsPanelText \
               submitScreenRequest pendingScreenRequest resolveScreenRequest isUserUsingPhone \
-              maybeHoldScreen releaseScreenNow isScreenGrab ; do
+              maybeHoldScreen releaseScreenNow isScreenGrab taskIdOf ; do
             if grep -aq "$sym" "$T"/classes*.dex 2>/dev/null; then
               printf "   ✅ %s\n" "$sym"
             else
