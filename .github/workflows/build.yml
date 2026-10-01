@@ -15,6 +15,10 @@ on:
         description: '瘦身构建（不打包 payload.zip，APK 约 10MB）'
         required: true
         default: 'false'
+      variant:
+        description: '构建变体：official=com.deepseek.harness / compat=com.deepseek.harness.compat'
+        required: true
+        default: 'official'
       official_tag:
         description: '抽取 payload 用的官方 release tag'
         required: true
@@ -90,6 +94,16 @@ jobs:
               -dname "CN=DSH Custom, OU=Self, O=Self, L=NA, ST=NA, C=CN"
           fi
 
+      - name: 变体处理（compat 改包名）
+        if: ${{ github.event.inputs.variant }} == 'compat'
+        run: |
+          set -e
+          cd android-app
+          sed -i 's|package="com.deepseek.harness"|package="com.deepseek.harness.compat"|' AndroidManifest.xml
+          sed -i 's|android:versionName="\([^"]*\)"|android:versionName="\1-compat"|' AndroidManifest.xml
+          echo '--- 改完的 manifest ---'
+          grep -nE 'package=|versionName' AndroidManifest.xml | head -4
+
       - name: 编译打包（照搬 build.sh 的 1/7 ~ 7/7）
         env:
           KEYSTORE_PASS: dshpass1234
@@ -106,7 +120,7 @@ jobs:
           mkdir -p out/gen out/classes out/dex assets
 
           echo "== 1/7 资源编译 (aapt) =="
-          aapt package -f -m -J out/gen -M AndroidManifest.xml -S res -I "$AJ"
+          aapt package -f -m --custom-package com.deepseek.harness -J out/gen -M AndroidManifest.xml -S res -I "$AJ"
           ls out/gen/com/deepseek/harness/
 
           echo "== 2/7 javac =="
