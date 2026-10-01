@@ -11,10 +11,18 @@ on:
         description: '源码 ref（tag 或分支）'
         required: true
         default: 'v1.15.2'
+      slim:
+        description: '瘦身构建（不打包 payload.zip，APK 约 10MB）'
+        required: true
+        default: 'false'
       official_tag:
         description: '抽取 payload 用的官方 release tag'
         required: true
         default: 'v1.15.2'
+      slim:
+        description: '瘦身构建（不打包 payload.zip，APK 约 10MB）'
+        required: true
+        default: 'false'
 
 jobs:
   build:
@@ -138,9 +146,15 @@ jobs:
           grep -aq "MainActivity" "$P/out/dex/classes.dex" || { echo "!! classes.dex 缺少 MainActivity"; exit 1; }
           echo "  classes.dex $(stat -c%s "$P/out/dex/classes.dex") bytes"
 
-          echo "== 打包 payload.zip（staging -> assets）=="
-          ( cd staging && jar cMf "$P/assets/payload.zip" . )
-          ls -la "$P/assets/payload.zip"
+          if [ "${{ github.event.inputs.slim }}" = "true" ]; then
+            echo "== 瘦身构建：APK 内不带 payload.zip =="
+            rm -rf "$P/assets"; mkdir -p "$P/assets"
+            touch "$P/assets/.keep"
+          else
+            echo "== 打包 payload.zip（staging -> assets）=="
+            ( cd staging && jar cMf "$P/assets/payload.zip" . )
+            ls -la "$P/assets/payload.zip"
+          fi
 
           echo "== 4/7 aapt 打包 + assets =="
           aapt package -f -M AndroidManifest.xml -S res -I "$AJ" -A assets -0 zip -F "$P/out/unsigned.apk"
