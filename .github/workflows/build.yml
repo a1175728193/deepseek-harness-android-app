@@ -95,7 +95,7 @@ jobs:
           fi
 
       - name: 变体处理（compat 改包名）
-        if: ${{ github.event.inputs.variant }} == 'compat'
+        if: ${{ github.event.inputs.variant == 'compat' }}
         run: |
           set -e
           cd android-app
