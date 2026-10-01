@@ -966,8 +966,121 @@ public class OverlayService extends Service {
     }
     // ══════════════════ v1.17 状态颜色 + 步骤 + 上报接口 ══════════════════
 
+    // ══════════════════ v1.18 屏幕占用授权 ══════════════════
+    //
+    // 背景：AI 需要"抢前台"（打开别的 App、点屏幕、按 HOME）时会打断用户。
+    // 2026-10-01 真实事故三连：拉迅雷把用户从抖音顶掉 / 按 HOME 把用户踢出抖音 /
+    // force-stop 把用户的梯子关了。所以加这道闸：AI 先申请，用户决定，AI 才动。
+    //
+    // 分工：悬浮窗负责【提醒】（DSH 在后台也看得见红球），
+    //       控制台卡片负责【决策】（用户把 DSH 切到前台看清楚再选）。
+
+    /** 一次"要占用屏幕"的申请。 */
+    public static class ScreenRequest {
+        public final String id;
+        public final String what;      // 要做什么（人话）
+        public final String why;       // 为什么（人话）
+        public final String eta;       // 大约多久
+        public final String payload;   // 用户选"我自己做"时要给他的东西（如下载链接）
+        public final long createdAt;
+        /** pending | allowed | self | denied | timeout */
+        public volatile String status = "pending";
+        ScreenRequest(String id, String what, String why, String eta, String payload) {
+            this.id = id; this.what = what; this.why = why; this.eta = eta;
+            this.payload = payload; this.createdAt = System.currentTimeMillis();
+        }
+    }
+
+    private static final java.util.LinkedHashMap<String, ScreenRequest> screenReqs =
+            new java.util.LinkedHashMap<String, ScreenRequest>();
+    private static final java.util.LinkedList<String> screenOrder = new java.util.LinkedList<String>();
+    private static long screenSeq = 0L;
+    /** 申请多久没人理就作废 —— 安全默认：不回答 = 不批准。 */
+    private static final long SCREEN_REQ_TIMEOUT_MS = 5 * 60 * 1000L;
+    /** 多久内有触摸才算"用户正在操作"。 */
+    private static final long USER_ACTIVE_WINDOW_MS = 30 * 1000L;
+
+    /** AI 提交一个"要占用屏幕"的申请，拿到 id 后按 id 轮询结果。 */
+    public static synchronized ScreenRequest submitScreenRequest(
+            String what, String why, String eta, String payload) {
+        String id = "r" + (++screenSeq);
+        ScreenRequest r = new ScreenRequest(id, what, why, eta, payload);
+        screenReqs.put(id, r);
+        screenOrder.add(id);
+        while (screenOrder.size() > 20) {          // 别把内存当日志用
+            String old = screenOrder.poll();
+            if (old != null) screenReqs.remove(old);
+        }
+        OverlayService s = instance;
+        if (s != null) {
+            s.handler.post(new Runnable() { @Override public void run() { s.updateEngineStatusUi(); } });
+        }
+        return r;
+    }
+
+    /** 队首那个还在等答复的申请；没有就返回 null。超时的自动作废。 */
+    public static synchronized ScreenRequest pendingScreenRequest() {
+        long now = System.currentTimeMillis();
+        for (String id : screenOrder) {
+            ScreenRequest r = screenReqs.get(id);
+            if (r == null || !"pending".equals(r.status)) continue;
+            if (now - r.createdAt > SCREEN_REQ_TIMEOUT_MS) { r.status = "timeout"; continue; }
+            return r;
+        }
+        return null;
+    }
+
+    /** 队首申请的 id（给控制台做"变了才重建"判断）。 */
+    public static String pendingScreenRequestId() {
+        ScreenRequest r = pendingScreenRequest();
+        return r == null ? "" : r.id;
+    }
+
+    /** 按 id 查申请（AI 轮询用）。 */
+    public static synchronized ScreenRequest screenRequest(String id) {
+        ScreenRequest r = screenReqs.get(id);
+        if (r != null && "pending".equals(r.status)
+                && System.currentTimeMillis() - r.createdAt > SCREEN_REQ_TIMEOUT_MS) {
+            r.status = "timeout";
+        }
+        return r;
+    }
+
+    /** 用户做了决定：allowed（让给你）/ self（我自己做）/ denied（拒绝）。 */
+    public static synchronized void resolveScreenRequest(String id, String status) {
+        ScreenRequest r = screenReqs.get(id);
+        if (r != null && "pending".equals(r.status)) r.status = status;
+        OverlayService s = instance;
+        if (s != null) {
+            s.handler.post(new Runnable() { @Override public void run() { s.updateEngineStatusUi(); } });
+        }
+    }
+
+    /**
+     * 用户是不是"正在用手机"？三个条件同时成立才算：
+     * ① 屏幕亮 ② 前台不是本 App ③ 最近 30 秒内有触摸。
+     * 判断不了时返回 true —— 保守：宁可多问一次，也别打断用户。
+     */
+    public static boolean isUserUsingPhone(Context ctx) {
+        try {
+            android.os.PowerManager pm =
+                    (android.os.PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            if (pm != null && !pm.isInteractive()) return false;      // 息屏 → 没在用
+            String fg = AccessibilityService.activePackage;
+            boolean otherApp = fg != null && fg.length() > 0 && !fg.equals(ctx.getPackageName());
+            long touch = AccessibilityService.lastTouchAt;
+            boolean touched = touch > 0L
+                    && (System.currentTimeMillis() - touch) < USER_ACTIVE_WINDOW_MS;
+            return otherApp && touched;
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
     /** 当前有效状态（超时未更新则返回空）。 */
     private String effectiveState() {
+        // v1.18：有待授权的屏幕请求时，红灯盖过一切（这是最需要用户注意的事）
+        if (pendingScreenRequest() != null) return "need";
         String st = taskState;
         if (st == null || st.length() == 0) return "";
         long age = stateAt > 0L ? System.currentTimeMillis() - stateAt : 0L;
@@ -1046,6 +1159,8 @@ public class OverlayService extends Service {
 
     /** 球下面那行字的内容。空闲/无状态 → 返回空串（字消失，只留球）。 */
     private String captionLabel() {
+        ScreenRequest req = pendingScreenRequest();
+        if (req != null) return "⚠ 需要占用屏幕\n切到 DSH 查看详情";
         String st = effectiveState();
         if (st.length() == 0 || "idle".equals(st)) return "";
         StringBuilder sb = new StringBuilder();
@@ -1205,6 +1320,8 @@ public class OverlayService extends Service {
             json = "{\"ok\":true,\"state\":\"" + effectiveState() + "\",\"step\":" + stepIndex + ",\"total\":" + stepTotal + "}";
         } else if (path.startsWith("/overlay-ping")) {
             json = "{\"ok\":true,\"state\":\"" + effectiveState() + "\"}";
+        } else if (path.startsWith("/screen-request")) {
+            json = handleScreenRequest(method, path, bodyStr);
         } else {
             json = "{\"ok\":false,\"err\":\"unknown path\"}";
         }
@@ -1218,6 +1335,45 @@ public class OverlayService extends Service {
 
         if (dock) handler.post(new Runnable() { @Override public void run() { dockToEdge(); } });
         else handler.post(new Runnable() { @Override public void run() { updateEngineStatusUi(); } });
+    }
+
+    /**
+     * /screen-request 的处理。
+     *   POST /screen-request  {"what":"..","why":"..","eta":"..","payload":".."} → 提交申请
+     *   GET  /screen-request                 → 队首还在等的申请
+     *   GET  /screen-request?id=r1           → 按 id 查结果（AI 轮询用）
+     */
+    private String handleScreenRequest(String method, String path, String body) {
+        try {
+            if ("POST".equalsIgnoreCase(method)) {
+                String what = strField(body, "what", "占用屏幕");
+                String why  = strField(body, "why", "");
+                String eta  = strField(body, "eta", "");
+                String pay  = strField(body, "payload", "");
+                ScreenRequest r = submitScreenRequest(what, why, eta, pay);
+                return "{\"ok\":true,\"id\":\"" + r.id + "\",\"status\":\"pending\",\"userUsing\":"
+                        + isUserUsingPhone(this) + "}";
+            }
+            String id = null;
+            int i = path.indexOf("id=");
+            if (i >= 0) {
+                id = path.substring(i + 3);
+                int amp = id.indexOf('&');
+                if (amp >= 0) id = id.substring(0, amp);
+            }
+            if (id == null || id.length() == 0) {
+                ScreenRequest p = pendingScreenRequest();
+                return p == null
+                        ? "{\"ok\":true,\"pending\":null}"
+                        : "{\"ok\":true,\"pending\":\"" + p.id + "\",\"status\":\"" + p.status + "\"}";
+            }
+            ScreenRequest r = screenRequest(id);
+            return r == null
+                    ? "{\"ok\":false,\"err\":\"no such id\"}"
+                    : "{\"ok\":true,\"id\":\"" + r.id + "\",\"status\":\"" + r.status + "\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"err\":\"screen request failed\"}";
+        }
     }
 
     /** 解析上报负载。既支持 JSON（{...}），也支持 GET 的 query（?state=working&step=2）。 */
