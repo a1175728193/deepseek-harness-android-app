@@ -2394,6 +2394,10 @@ public class MainActivity extends Activity {
                         respBody = handleScheduleRequest(body.toString());
                     } else if (path.startsWith("/usage")) {
                         respBody = handleUsageRequest(path, body.toString());
+                    } else if (path.startsWith("/screen-release")) {
+                        // v1.18.1：AI 可以显式请求还屏（更快），不依赖 20 秒空闲兜底
+                        releaseScreenNow("AI 显式请求");
+                        respBody = "{\"ok\":true}";
                     } else if (path.startsWith("/overlay")) {
                         respBody = handleOverlayRequest(path, body.toString());
                     } else if (path.startsWith("/status")) {
@@ -2470,10 +2474,120 @@ public class MainActivity extends Activity {
                 try { timeoutMs = Math.max(1000, Math.min(Integer.parseInt(tm.trim()), 120000)); }
                 catch (Exception ignored) {}
             }
+            // v1.18.1：抢屏动作自动记账（记住了用户原来在哪，并推迟"自动还屏"倒计时）
+            maybeHoldScreen(command);
             return shellViaShizuku(command, timeoutMs);
         } catch (Throwable t) {
             return "{\"ok\":false,\"error\":\"shell 路由异常：" + jesc(String.valueOf(t.getMessage())) + "\"}";
         }
+    }
+
+    // ══════════════════ v1.18.1 抢屏自动还屏 ══════════════════
+    //
+    // 用户原话：「你把迅雷下载以后就可以返回 DSH 了。但是你还停留在那个界面」，
+    // 以及「你记不住的，你把这个写进新的 app 里面」。
+    //
+    // 所以这条规矩【写在 App 里，不依赖 AI 自觉】：
+    //   所有特权命令都走 /shell，在这里自动识别"抢屏动作"（换前台 / 按键 / 杀进程）。
+    //   一旦发现：
+    //     ① 记住用户当时在哪个 App
+    //     ② 起一个"空闲倒计时"，AI 每发一条抢屏命令就重置
+    //     ③ 倒计时到点（AI 不再动作了）→ 自动把用户送回原来的 App
+    //
+    //   关键：抢屏动作的副作用（下载、安装）是后台跑的，AI 走了照样继续，
+    //         所以【根本不需要让用户停在新界面里】。
+    //
+    //   AI 也可以显式调 /screen-release 立刻还屏（更快），但流程不依赖它。
+
+    /** 抢屏前用户所在的包名。 */
+    private volatile String screenHoldPrev = null;
+    /** 我这次抢屏"打开"的那个包名 —— 用来判断用户有没有自己切走。 */
+    private volatile String screenHoldTarget = null;
+    /** 空闲多久没再抢屏就自动还屏。 */
+    private static final long SCREEN_HOLD_IDLE_MS = 20000L;
+    private Handler screenHoldHandler;
+    private final Runnable screenHoldRunnable = new Runnable() {
+        @Override public void run() { releaseScreenNow("空闲自动"); }
+    };
+
+    /** 这条命令会不会把用户看到的东西换掉？（换前台 / 按键 / 杀进程） */
+    private static boolean isScreenGrab(String cmd) {
+        if (cmd == null) return false;
+        String c = cmd.trim();
+        if (c.contains("am start")) return true;
+        if (c.contains("monkey ")) return true;
+        if (c.contains("am force-stop")) return true;
+        if (c.contains("input keyevent")) {
+            if (c.contains(" 3") || c.contains(" 4") || c.contains(" 187")
+                    || c.contains("KEYCODE_HOME") || c.contains("KEYCODE_BACK")
+                    || c.contains("KEYCODE_APP_SWITCH")) return true;
+        }
+        return false;
+    }
+
+    /** 从命令里尽量猜出"要打开哪个包"（am start -n pkg/act、-p pkg、monkey -p pkg）。 */
+    private static String parseTargetPkg(String cmd) {
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("(?:-n[ ]+|-p[ ]+)([A-Za-z0-9_.]+)").matcher(cmd);
+            if (m.find()) return m.group(1);
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    /** 抢屏动作前记一笔。 */
+    private void maybeHoldScreen(String command) {
+        try {
+            if (!isScreenGrab(command)) return;
+            if (screenHoldPrev == null) {
+                String prev = AccessibilityService.activePackage;
+                screenHoldPrev = (prev == null || prev.isEmpty()) ? null : prev;
+                Log.i(TAG, "screen hold begin, prev=" + screenHoldPrev);
+            }
+            String tgt = parseTargetPkg(command);
+            if (tgt != null && !tgt.isEmpty()) screenHoldTarget = tgt;
+            if (screenHoldHandler == null) screenHoldHandler = new Handler(Looper.getMainLooper());
+            screenHoldHandler.removeCallbacks(screenHoldRunnable);
+            screenHoldHandler.postDelayed(screenHoldRunnable, SCREEN_HOLD_IDLE_MS);
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 把用户送回抢屏前所在的 App。
+     * 用 launcher intent 把那个 App 的【已有任务】拉到前台 —— 不重启它、不丢它的状态。
+     */
+    private void releaseScreenNow(String why) {
+        try {
+            if (screenHoldHandler != null) screenHoldHandler.removeCallbacks(screenHoldRunnable);
+            final String prev = screenHoldPrev;
+            final String tgt = screenHoldTarget;
+            screenHoldPrev = null;
+            screenHoldTarget = null;
+            if (prev == null || prev.isEmpty()) return;
+
+            // 用户自己切走了就别抢回来（前台已经不是我打开的那个 App 了）
+            String cur = AccessibilityService.activePackage;
+            if (tgt != null && cur != null && !cur.isEmpty() && !cur.equals(tgt)) {
+                Log.i(TAG, "screen hold skip (user moved to " + cur + ")");
+                return;
+            }
+            Log.i(TAG, "screen hold release (" + why + ") -> " + prev);
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        IShizukuService svc = IShizukuService.Stub.asInterface(Shizuku.getBinder());
+                        if (svc == null) return;
+                        IRemoteProcess p = svc.newProcess(new String[]{"/system/bin/sh", "-c",
+                                "monkey -p " + prev + " -c android.intent.category.LAUNCHER 1"},
+                                null, null);
+                        if (p == null) return;
+                        pumpStream(new android.os.ParcelFileDescriptor.AutoCloseInputStream(p.getInputStream()),
+                                new StringBuilder(), "hold-out");
+                        p.waitFor();
+                    } catch (Throwable ignored) {}
+                }
+            }, "screen-release").start();
+        } catch (Throwable ignored) {}
     }
 
     /** 经 Shizuku（App 进程内）以 shell uid 执行一条命令，回收输出，带超时兜底。 */
