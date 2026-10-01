@@ -186,6 +186,58 @@ jobs:
           aapt dump badging "$P/DeepSeekHarness.apk" | head -6
           ls -la "$P/DeepSeekHarness.apk"
 
+      - name: 自检（不通过就别下载了）
+        run: |
+          set -e
+          APK=android-app/DeepSeekHarness.apk
+          echo "════════════ 自检报告 ════════════"
+
+          echo "── 1) 签名 ──"
+          apksigner verify "$APK" && echo "   ✅ 签名有效"
+
+          echo "── 2) 包名 ──"
+          PKG=$(aapt dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -1)
+          case "${{ github.event.inputs.variant }}" in
+            compat) EXPECT=com.deepseek.harness.compat ;;
+            lite)   EXPECT=com.deepseek.harness.lite ;;
+            *)      EXPECT=com.deepseek.harness ;;
+          esac
+          echo "   实际: $PKG"
+          echo "   期望: $EXPECT"
+          if [ "$PKG" != "$EXPECT" ]; then echo "   ❌ 包名不符"; exit 1; fi
+          echo "   ✅ 包名正确"
+
+          echo "── 3) dex 关键方法（我在代码里加的功能）──"
+          T=$(mktemp -d); unzip -o -q "$APK" 'classes*.dex' -d "$T"
+          MISS=0
+          for sym in \
+              dockToEdge startFreeDwell nearEdge startFreeDwell \
+              applyStateColor stateColor startStatePulse stopStatePulse \
+              captionLabel applyCaption applySideAlignment \
+              startStatusServer stopStatusServer handleStatusHit applyStatusPayload \
+              effectiveState stepsPanelText ; do
+            if grep -aq "$sym" "$T"/classes*.dex 2>/dev/null; then
+              printf "   ✅ %s\n" "$sym"
+            else
+              printf "   ❌ %s  缺失\n" "$sym"; MISS=1
+            fi
+          done
+          rm -rf "$T"
+          if [ "$MISS" != "0" ]; then echo "   ❌ 有关键方法缺失"; exit 1; fi
+
+          echo "── 4) 状态服务端点字符串 ──"
+          T=$(mktemp -d); unzip -o -q "$APK" 'classes*.dex' -d "$T"
+          for s in "/overlay-status" "/overlay-dock" "/overlay-ping" ; do
+            if grep -aq "$s" "$T"/classes*.dex 2>/dev/null; then printf "   ✅ %s\n" "$s"; else printf "   ❌ %s 缺失\n" "$s"; MISS=1; fi
+          done
+          rm -rf "$T"
+          if [ "$MISS" != "0" ]; then echo "   ❌ 端点缺失"; exit 1; fi
+
+          echo "── 5) 体积 ──"
+          ls -la "$APK" | awk '{printf "   APK: %.1f MB\n", $5/1048576}'
+
+          echo "════════════ 自检通过 ✅ ════════════"
+
       - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
