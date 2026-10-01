@@ -153,8 +153,14 @@ public class OverlayService extends Service {
     private volatile long   stateAt   = 0L;
     /** 超过这么久没收到新上报，就把状态当作废（免得永远停在"进行中"）。 */
     private static final long STATE_TTL_MS = 15 * 60 * 1000L;
-    /** 面板里的步骤列表。 */
+    /** 面板里的步骤列表（面板已藏起，保留给长按展开时用）。 */
     private TextView stepsText;
+    // v1.17.2：球下面常驻的一行字（不用点开就能看到进度）
+    private TextView captionText;
+    private LinearLayout iconRow;
+    private LinearLayout.LayoutParams iconRowLp;
+    /** "完成"状态只常亮这么久，之后自动变灰（免得一直亮着）。 */
+    private static final long DONE_TTL_MS = 60 * 1000L;
     private java.net.ServerSocket statusServer;
     private volatile boolean statusServerRunning = false;
     private android.animation.ValueAnimator stateAnim;
@@ -291,10 +297,13 @@ public class OverlayService extends Service {
         // 收起态无背景（只留小鲸鱼图标）；背景移到展开面板 panelView 上
 
         // ===== 图标行（小鲸鱼）=====
-        LinearLayout iconRow = new LinearLayout(this);
+        iconRow = new LinearLayout(this);
         iconRow.setOrientation(LinearLayout.HORIZONTAL);
         iconRow.setGravity(Gravity.CENTER_VERTICAL);
         iconRow.setPadding(dp(4), dp(2), dp(4), dp(2));
+        iconRowLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        iconRow.setLayoutParams(iconRowLp);
 
         iconView = new ImageView(this);
         iconView.setImageResource(R.drawable.ic_whale_black); // DSH 鲸鱼（品牌蓝+白描边）
@@ -302,10 +311,35 @@ public class OverlayService extends Service {
         iconRow.addView(iconView);
         rootView.addView(iconRow);
 
+        // ===== v1.17.2 球下面挂字 =====
+        // 设计要点：球贴【外侧边缘】，字往【屏幕内侧】延伸 —— 这样字出现/消失时
+        // 球的屏幕位置不变（否则每次刷新文字球都会左右跳一下）。
+        captionText = new TextView(this);
+        captionText.setText("");
+        captionText.setTextColor(0xFFE8EEFC);
+        captionText.setTextSize(TypedValue.COMPLEX_UNIT_PX, getResources().getDimension(R.dimen.text_caption));
+        captionText.setMaxLines(2);
+        captionText.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        captionText.setGravity(Gravity.CENTER);
+        captionText.setMaxWidth(dp(154));
+        captionText.setVisibility(View.GONE);
+        GradientDrawable cbg = new GradientDrawable();
+        cbg.setColor(0xE00C1220);            // 深蓝黑，半透明（比面板更实一点，字才看得清）
+        cbg.setCornerRadius(dp(9));
+        captionText.setBackground(cbg);
+        captionText.setPadding(dp(7), dp(4), dp(7), dp(4));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(4);
+        captionText.setLayoutParams(clp);
+        rootView.addView(captionText);
+
         // ===== 状态面板（紧凑版，默认隐藏）=====
         panelView = new LinearLayout(this);
         panelView.setOrientation(LinearLayout.VERTICAL);
         panelView.setPadding(dp(10), dp(8), dp(10), dp(8));
+        panelView.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         GradientDrawable pbg = new GradientDrawable();
         pbg.setColor(getColor(R.color.panel_bg));              // 深蓝半透明（统一配色资源）
         pbg.setCornerRadius(dp(12));
@@ -384,6 +418,7 @@ public class OverlayService extends Service {
         panelView.addView(btnRow2);
         rootView.addView(panelView);
         setPanelVisible(false, false);
+        applySideAlignment();
 
         // ===== 拖动 + 点击 + 拖底隐藏 =====
         rootView.setOnTouchListener(new View.OnTouchListener() {
@@ -428,7 +463,9 @@ public class OverlayService extends Service {
                                 startFreeDwell();
                             }
                             if (panelVisible) setPanelVisible(true, false);
-                        } else if (System.currentTimeMillis() - downAt < 400) {
+                        } else if (System.currentTimeMillis() - downAt >= 600) {
+                            // v1.17.2：单击不再弹面板（用户要的是"球下面挂字"，不用点）。
+                            // 面板降级成隐藏入口：长按才出，虚拟屏预览等功能不丢。
                             setPanelVisible(!panelVisible, true);
                         }
                         setDismissHintInternal(false);
@@ -587,6 +624,7 @@ public class OverlayService extends Service {
             int w = rootView.getWidth() > 0 ? rootView.getWidth() : dp(60);
             int h = rootView.getHeight() > 0 ? rootView.getHeight() : dp(56);
             snappedRight = (lp.x + w / 2) > getResources().getDisplayMetrics().widthPixels / 2;
+            applySideAlignment();
             lp.x = edgeXFor(w);
             if (lp.y < 0) lp.y = 0;
             if (lp.y > screenH - h) lp.y = Math.max(0, screenH - h);
@@ -885,6 +923,7 @@ public class OverlayService extends Service {
             aiText.setText(aiStatusText());
         }
         applyStateColor();
+        applyCaption();
         if (stepsText != null) {
             String s = stepsPanelText();
             stepsText.setText(s);
@@ -931,7 +970,9 @@ public class OverlayService extends Service {
     private String effectiveState() {
         String st = taskState;
         if (st == null || st.length() == 0) return "";
-        if (stateAt > 0L && System.currentTimeMillis() - stateAt > STATE_TTL_MS) return "";
+        long age = stateAt > 0L ? System.currentTimeMillis() - stateAt : 0L;
+        if ("done".equals(st) && age > DONE_TTL_MS) return "";   // 完成只亮 60 秒
+        if (age > STATE_TTL_MS) return "";
         return st;
     }
 
@@ -998,6 +1039,68 @@ public class OverlayService extends Service {
     private void stopStatePulse() {
         try {
             if (stateAnim != null) { stateAnim.cancel(); stateAnim = null; }
+        } catch (Throwable ignored) {}
+    }
+
+    // ══════════════════ v1.17.2 球下面那行字 ══════════════════
+
+    /** 球下面那行字的内容。空闲/无状态 → 返回空串（字消失，只留球）。 */
+    private String captionLabel() {
+        String st = effectiveState();
+        if (st.length() == 0 || "idle".equals(st)) return "";
+        StringBuilder sb = new StringBuilder();
+        if ("working".equals(st)) {
+            if (stepTotal > 0) sb.append(Math.min(stepIndex, stepTotal)).append("/").append(stepTotal).append("  ");
+            sb.append(stepText != null && stepText.length() > 0 ? stepText : "工作中");
+        } else if ("done".equals(st)) {
+            sb.append("✅ ");
+            if (stepTotal > 0) sb.append(stepTotal).append("/").append(stepTotal).append("  ");
+            sb.append(stepText != null && stepText.length() > 0 ? stepText : "完成");
+        } else if ("need".equals(st)) {
+            sb.append("⚠ ").append(stepText != null && stepText.length() > 0 ? stepText : "需要你确认");
+        } else {
+            return "";
+        }
+        if (stepEta != null && stepEta.length() > 0) sb.append("\n").append(stepEta);
+        return sb.toString();
+    }
+
+    /** 把字刷到球下面；可见性变化时重新摆位（球位置不变，字往内侧长）。 */
+    private void applyCaption() {
+        if (captionText == null) return;
+        String txt = captionLabel();
+        boolean shouldShow = txt.length() > 0;
+        boolean wasShown = captionText.getVisibility() == View.VISIBLE;
+        if (!txt.equals(captionText.getText() == null ? "" : captionText.getText().toString())) {
+            captionText.setText(txt);
+        }
+        if (shouldShow != wasShown) {
+            captionText.setVisibility(shouldShow ? View.VISIBLE : View.GONE);
+            // 窗口宽度变了：等布局落定后按真实宽度重新贴边（球贴外侧，位置不跳）
+            settleAfterLayout();
+        }
+    }
+
+    /**
+     * 按"球当前靠哪边"决定内部对齐：
+     * snappedRight → 球靠右、字往左长；否则球靠左、字往右长。
+     * 这样字出现时球不会横向移动。
+     */
+    private void applySideAlignment() {
+        try {
+            int g = snappedRight ? Gravity.END : Gravity.START;
+            if (iconRowLp != null) {
+                iconRowLp.gravity = g;
+                if (iconRow != null) iconRow.setLayoutParams(iconRowLp);
+            }
+            if (captionText != null && captionText.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+                ((LinearLayout.LayoutParams) captionText.getLayoutParams()).gravity = g;
+                captionText.setLayoutParams(captionText.getLayoutParams());
+            }
+            if (panelView != null && panelView.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+                ((LinearLayout.LayoutParams) panelView.getLayoutParams()).gravity = g;
+                panelView.setLayoutParams(panelView.getLayoutParams());
+            }
         } catch (Throwable ignored) {}
     }
 
