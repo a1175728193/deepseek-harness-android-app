@@ -158,6 +158,8 @@ public class OverlayService extends Service {
     private java.net.ServerSocket statusServer;
     private volatile boolean statusServerRunning = false;
     private android.animation.ValueAnimator stateAnim;
+    private int  pulseColor = 0;
+    private long pulsePeriodMs = 0L;
 
     public static int enginePort(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -936,10 +938,12 @@ public class OverlayService extends Service {
     /** 状态 → 颜色。空串 = 不染色（保持原图标）。 */
     private int stateColor() {
         String st = effectiveState();
-        if ("working".equals(st)) return getColor(R.color.accent_brand);   // 蓝：进行中
-        if ("done".equals(st))    return 0xFF34C759;                       // 绿：完成
-        if ("need".equals(st))    return 0xFFFF3B30;                       // 红：需要你
-        if ("idle".equals(st))    return 0xFF8E8E93;                       // 灰：空闲
+        // v1.17.1 调色：默认鲸鱼图标本身就是品牌蓝，working 再用蓝就看不出变化，
+        // 所以 working 改青色（亮、和图标蓝区分明显）；idle 用灰，四种状态一眼可辨。
+        if ("working".equals(st)) return 0xFF00BCD4;   // 青：进行中（呼吸）
+        if ("done".equals(st))    return 0xFF34C759;   // 绿：完成
+        if ("need".equals(st))    return 0xFFFF3B30;   // 红：需要你（快闪）
+        if ("idle".equals(st))    return 0xFF9E9E9E;   // 灰：空闲
         return 0;
     }
 
@@ -966,8 +970,13 @@ public class OverlayService extends Service {
 
     /** 呼吸/闪烁：在颜色上叠加 alpha 动画。periodMs 越小越急。 */
     private void startStatePulse(final int color, final long periodMs) {
-        if (stateAnim != null && stateAnim.isRunning()) return;
+        // v1.17.1 修：原来这里在动画已运行时直接 return，导致换状态（如 working→need）
+        // 时颜色永远停在旧色。改为：同色同周期才复用，否则一律停掉重启。
+        if (stateAnim != null && stateAnim.isRunning()
+                && color == pulseColor && periodMs == pulsePeriodMs) return;
         stopStatePulse();
+        pulseColor = color;
+        pulsePeriodMs = periodMs;
         try {
             stateAnim = android.animation.ValueAnimator.ofFloat(1f, 0.35f);
             stateAnim.setDuration(periodMs);
