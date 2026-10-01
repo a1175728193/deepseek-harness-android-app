@@ -2503,6 +2503,13 @@ public class MainActivity extends Activity {
     private volatile String screenHoldPrev = null;
     /** 我这次抢屏"打开"的那个包名 —— 用来判断用户有没有自己切走。 */
     private volatile String screenHoldTarget = null;
+    /**
+     * v1.18.2：抢屏前用户那个 App 的【taskId】。
+     * 还屏用它走 「am task focus <id>」 —— 把【已有任务】拉到前台，不重建 Activity，
+     * 所以用户回来时还是原来那个界面（实测：DSH 用 monkey 拉回来会冷启动落到控制台，
+     * 用 am task focus 则停在对话页）。这是用户报的"回来的不是对话界面而是配置界面"的正解。
+     */
+    private volatile String screenHoldTaskId = null;
     /** 空闲多久没再抢屏就自动还屏。 */
     private static final long SCREEN_HOLD_IDLE_MS = 20000L;
     private Handler screenHoldHandler;
@@ -2535,6 +2542,27 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    /**
+     * 查某个包对应的 taskId。
+     * 从 「dumpsys activity activities」 里找形如
+     *   * Task{... #11306 type=standard A=10384:com.deepseek.harness.compat ...}
+     * 的那一行，抠出 # 后面的数字。
+     */
+    private String taskIdOf(String pkg) {
+        try {
+            if (pkg == null || pkg.isEmpty()) return null;
+            String r = shellViaShizuku(
+                    "dumpsys activity activities | grep -m1 '" + pkg + "' | grep -oE '#[0-9]+' | tr -d '#' | head -1",
+                    8000);
+            String out = jsonField(r, "stdout");
+            if (out != null) {
+                out = out.trim();
+                if (out.matches("[0-9]+")) return out;
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
     /** 抢屏动作前记一笔。 */
     private void maybeHoldScreen(String command) {
         try {
@@ -2546,6 +2574,9 @@ public class MainActivity extends Activity {
             }
             String tgt = parseTargetPkg(command);
             if (tgt != null && !tgt.isEmpty()) screenHoldTarget = tgt;
+            if (screenHoldTaskId == null && screenHoldPrev != null) {
+                screenHoldTaskId = taskIdOf(screenHoldPrev);
+            }
             if (screenHoldHandler == null) screenHoldHandler = new Handler(Looper.getMainLooper());
             screenHoldHandler.removeCallbacks(screenHoldRunnable);
             screenHoldHandler.postDelayed(screenHoldRunnable, SCREEN_HOLD_IDLE_MS);
@@ -2561,8 +2592,10 @@ public class MainActivity extends Activity {
             if (screenHoldHandler != null) screenHoldHandler.removeCallbacks(screenHoldRunnable);
             final String prev = screenHoldPrev;
             final String tgt = screenHoldTarget;
+            final String tid = screenHoldTaskId;
             screenHoldPrev = null;
             screenHoldTarget = null;
+            screenHoldTaskId = null;
             if (prev == null || prev.isEmpty()) return;
 
             // 用户自己切走了就别抢回来（前台已经不是我打开的那个 App 了）
@@ -2571,14 +2604,18 @@ public class MainActivity extends Activity {
                 Log.i(TAG, "screen hold skip (user moved to " + cur + ")");
                 return;
             }
-            Log.i(TAG, "screen hold release (" + why + ") -> " + prev);
+            // v1.18.2：优先 「am task focus <taskId>」 —— 不重建 Activity，界面原样。
+            // 只有拿不到 taskId 时才退回 monkey（会冷启动，可能落到控制台）。
+            final String cmd = (tid != null && tid.matches("[0-9]+"))
+                    ? "am task focus " + tid
+                    : "monkey -p " + prev + " -c android.intent.category.LAUNCHER 1";
+            Log.i(TAG, "screen hold release (" + why + ") -> " + prev + "  cmd=" + cmd);
             new Thread(new Runnable() {
                 @Override public void run() {
                     try {
                         IShizukuService svc = IShizukuService.Stub.asInterface(Shizuku.getBinder());
                         if (svc == null) return;
-                        IRemoteProcess p = svc.newProcess(new String[]{"/system/bin/sh", "-c",
-                                "monkey -p " + prev + " -c android.intent.category.LAUNCHER 1"},
+                        IRemoteProcess p = svc.newProcess(new String[]{"/system/bin/sh", "-c", cmd},
                                 null, null);
                         if (p == null) return;
                         pumpStream(new android.os.ParcelFileDescriptor.AutoCloseInputStream(p.getInputStream()),
