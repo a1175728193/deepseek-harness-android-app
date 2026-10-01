@@ -136,6 +136,25 @@ public class OverlayService extends Service {
     private volatile HashSet<String> activeSessions = new HashSet<String>();
     private volatile long finishedAt = 0L;
 
+    // ══ v1.17 显式状态上报 ══════════════════════════════════════════
+    // AI 通过 POST http://127.0.0.1:<enginePort+10>/overlay-status 主动上报
+    // 「我现在在干什么」，比 /proc 扫描会话文件准得多（那个只能猜"忙/闲"）。
+    // state: "" 未上报 | idle 空闲 | working 进行中 | done 完成 | need 需要你
+    private volatile String taskState = "";
+    private volatile int    stepIndex = 0;
+    private volatile int    stepTotal = 0;
+    private volatile String stepText  = "";
+    private volatile String stepEta   = "";
+    private volatile String stepExtra = "";      // 已完成步骤的多行文本
+    private volatile long   stateAt   = 0L;
+    /** 超过这么久没收到新上报，就把状态当作废（免得永远停在"进行中"）。 */
+    private static final long STATE_TTL_MS = 15 * 60 * 1000L;
+    /** 面板里的步骤列表。 */
+    private TextView stepsText;
+    private java.net.ServerSocket statusServer;
+    private volatile boolean statusServerRunning = false;
+    private android.animation.ValueAnimator stateAnim;
+
     public static int enginePort(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(PREFS, MODE_PRIVATE);
         return sp.getInt(KEY_PORT, defaultEnginePort(ctx));
@@ -181,6 +200,7 @@ public class OverlayService extends Service {
         foregroundWantsHidden = MainActivity.overlayForeground;   // v1.13.11：改为记状态再统一应用
         applyVisibleNow();
         handler.postDelayed(probeRunnable, 200);
+        startStatusServer();
     }
 
     @Override
@@ -205,6 +225,8 @@ public class OverlayService extends Service {
     public void onDestroy() {
         isRunning = false;
         if (instance == this) instance = null;
+        stopStatusServer();
+        stopStatePulse();
         stopVscreenPreview();
         handler.removeCallbacksAndMessages(null);
         if (rootView != null && wm != null) {
@@ -295,6 +317,15 @@ public class OverlayService extends Service {
         aiText.setTextColor(getColor(R.color.panel_text_dim));
         aiText.setTextSize(TypedValue.COMPLEX_UNIT_PX, getResources().getDimension(R.dimen.text_caption));
         panelView.addView(aiText);
+
+        // v1.17 步骤列表：AI 上报"第几步/共几步/正在做什么"
+        stepsText = new TextView(this);
+        stepsText.setText("");
+        stepsText.setTextColor(getColor(R.color.panel_text_bright));
+        stepsText.setTextSize(TypedValue.COMPLEX_UNIT_PX, getResources().getDimension(R.dimen.text_caption));
+        stepsText.setPadding(0, dp(4), 0, 0);
+        stepsText.setVisibility(View.GONE);
+        panelView.addView(stepsText);
 
         // v1.9 虚拟屏预览（默认隐藏）：悬浮窗实时显示虚拟屏画面
         vscreenImageView = new ImageView(this);
@@ -847,6 +878,12 @@ public class OverlayService extends Service {
         if (aiText != null) {
             aiText.setText(aiStatusText());
         }
+        applyStateColor();
+        if (stepsText != null) {
+            String s = stepsPanelText();
+            stepsText.setText(s);
+            stepsText.setVisibility(s.length() == 0 ? View.GONE : View.VISIBLE);
+        }
         // 面板开着的话顺带刷新销毁屏按钮的可见性
         if (panelVisible) refreshPanelDynamicRows();
         // 更新常驻通知
@@ -882,6 +919,246 @@ public class OverlayService extends Service {
         lastSessionsHadWork = false;
         return "AI：空闲";
     }
+    // ══════════════════ v1.17 状态颜色 + 步骤 + 上报接口 ══════════════════
+
+    /** 当前有效状态（超时未更新则返回空）。 */
+    private String effectiveState() {
+        String st = taskState;
+        if (st == null || st.length() == 0) return "";
+        if (stateAt > 0L && System.currentTimeMillis() - stateAt > STATE_TTL_MS) return "";
+        return st;
+    }
+
+    /** 状态 → 颜色。空串 = 不染色（保持原图标）。 */
+    private int stateColor() {
+        String st = effectiveState();
+        if ("working".equals(st)) return getColor(R.color.accent_brand);   // 蓝：进行中
+        if ("done".equals(st))    return 0xFF34C759;                       // 绿：完成
+        if ("need".equals(st))    return 0xFFFF3B30;                       // 红：需要你
+        if ("idle".equals(st))    return 0xFF8E8E93;                       // 灰：空闲
+        return 0;
+    }
+
+    /** 把状态颜色刷到小鲸鱼上。working 时做缓慢呼吸，need 时快闪。 */
+    private void applyStateColor() {
+        if (iconView == null) return;
+        final int c = stateColor();
+        if (c == 0) {
+            stopStatePulse();
+            try { iconView.clearColorFilter(); } catch (Throwable ignored) {}
+            return;
+        }
+        String st = effectiveState();
+        boolean pulse = "working".equals(st) || "need".equals(st);
+        if (pulse) {
+            startStatePulse(c, "need".equals(st) ? 420L : 1400L);
+        } else {
+            stopStatePulse();
+            try {
+                iconView.setColorFilter(c, android.graphics.PorterDuff.Mode.SRC_IN);
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 呼吸/闪烁：在颜色上叠加 alpha 动画。periodMs 越小越急。 */
+    private void startStatePulse(final int color, final long periodMs) {
+        if (stateAnim != null && stateAnim.isRunning()) return;
+        stopStatePulse();
+        try {
+            stateAnim = android.animation.ValueAnimator.ofFloat(1f, 0.35f);
+            stateAnim.setDuration(periodMs);
+            stateAnim.setRepeatCount(android.animation.ValueAnimator.INFINITE);
+            stateAnim.setRepeatMode(android.animation.ValueAnimator.REVERSE);
+            stateAnim.addUpdateListener(new android.animation.ValueAnimator.AnimatorUpdateListener() {
+                @Override public void onAnimationUpdate(android.animation.ValueAnimator a) {
+                    if (iconView == null) return;
+                    float f = (Float) a.getAnimatedValue();
+                    int alpha = Math.max(1, Math.min(255, Math.round(255 * f)));
+                    int cc = (alpha << 24) | (color & 0x00FFFFFF);
+                    try { iconView.setColorFilter(cc, android.graphics.PorterDuff.Mode.SRC_IN); } catch (Throwable ignored) {}
+                }
+            });
+            stateAnim.start();
+        } catch (Throwable ignored) {}
+    }
+
+    private void stopStatePulse() {
+        try {
+            if (stateAnim != null) { stateAnim.cancel(); stateAnim = null; }
+        } catch (Throwable ignored) {}
+    }
+
+    /** 面板里的步骤列表文本。 */
+    private String stepsPanelText() {
+        String st = effectiveState();
+        if (st.length() == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        String head;
+        if ("working".equals(st)) head = "进行中";
+        else if ("done".equals(st)) head = "已完成";
+        else if ("need".equals(st)) head = "需要你确认";
+        else head = "空闲";
+        if (stepTotal > 0) head = head + "  " + Math.min(stepIndex, stepTotal) + "/" + stepTotal;
+        sb.append(head);
+        if (stepText != null && stepText.length() > 0) {
+            sb.append("\n").append("· ").append(stepText);
+            if (stepEta != null && stepEta.length() > 0) sb.append("（").append(stepEta).append("）");
+        }
+        if (stepExtra != null && stepExtra.length() > 0) {
+            sb.append("\n").append(stepExtra);
+        }
+        return sb.toString();
+    }
+
+    // ── 极简 HTTP 服务：接 AI 的状态上报与归位请求 ──────────────────
+
+    private void startStatusServer() {
+        if (statusServerRunning) return;
+        statusServerRunning = true;
+        final int port = enginePort + 10;
+        new Thread(new Runnable() { @Override public void run() {
+            try {
+                statusServer = new java.net.ServerSocket();
+                statusServer.setReuseAddress(true);
+                statusServer.bind(new java.net.InetSocketAddress("127.0.0.1", port));
+                Log.i(TAG, "overlay status server on 127.0.0.1:" + port);
+                while (statusServerRunning && statusServer != null && !statusServer.isClosed()) {
+                    java.net.Socket s = statusServer.accept();
+                    try { handleStatusHit(s); } catch (Throwable ignored) {}
+                    try { s.close(); } catch (Throwable ignored) {}
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "overlay status server stopped: " + t.getMessage());
+            }
+            statusServerRunning = false;
+        }}, "overlay-status").start();
+    }
+
+    private void stopStatusServer() {
+        statusServerRunning = false;
+        try { if (statusServer != null) statusServer.close(); } catch (Throwable ignored) {}
+        statusServer = null;
+    }
+
+    /** 处理一条上报请求。支持 POST 与 GET（GET 方便用浏览器/curl 调试）。 */
+    private void handleStatusHit(java.net.Socket sock) throws Exception {
+        sock.setSoTimeout(4000);
+        java.io.InputStream in = sock.getInputStream();
+        java.io.ByteArrayOutputStream head = new java.io.ByteArrayOutputStream();
+        int c;
+        int empties = 0;
+        while ((c = in.read()) >= 0) {
+            head.write(c);
+            // HTTP 头以 \r\n\r\n 结束；容错也认 \n\n
+            if (c == '\n') {
+                if (++empties >= 2) break;
+            } else if (c != '\r') {
+                empties = 0;
+            }
+            if (head.size() > 65536) break;   // 防呆
+        }
+        String headStr = head.toString("UTF-8");
+        String firstLine = headStr.split("\r?\n")[0];
+        String[] parts = firstLine.split(" ");
+        String method = parts.length > 0 ? parts[0] : "GET";
+        String path = parts.length > 1 ? parts[1] : "/";
+
+        int contentLength = 0;
+        for (String ln : headStr.split("\r?\n")) {
+            int i = ln.indexOf(':');
+            if (i > 0 && ln.substring(0, i).trim().equalsIgnoreCase("Content-Length")) {
+                try { contentLength = Integer.parseInt(ln.substring(i + 1).trim()); } catch (Throwable ignored) {}
+            }
+        }
+        byte[] body = new byte[Math.max(0, Math.min(contentLength, 65536))];
+        int read = 0;
+        while (read < body.length) {
+            int n = in.read(body, read, body.length - read);
+            if (n <= 0) break;
+            read += n;
+        }
+        String bodyStr = new String(body, 0, read, "UTF-8");
+
+        String json;
+        boolean dock = false;
+        if (path.startsWith("/overlay-dock")) {
+            dock = true;
+            json = "{\"ok\":true,\"docked\":true}";
+        } else if (path.startsWith("/overlay-status")) {
+            applyStatusPayload(bodyStr, path);
+            json = "{\"ok\":true,\"state\":\"" + effectiveState() + "\",\"step\":" + stepIndex + ",\"total\":" + stepTotal + "}";
+        } else if (path.startsWith("/overlay-ping")) {
+            json = "{\"ok\":true,\"state\":\"" + effectiveState() + "\"}";
+        } else {
+            json = "{\"ok\":false,\"err\":\"unknown path\"}";
+        }
+
+        byte[] out = json.getBytes("UTF-8");
+        String resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
+                + "Content-Length: " + out.length + "\r\nConnection: close\r\n\r\n";
+        sock.getOutputStream().write(resp.getBytes("UTF-8"));
+        sock.getOutputStream().write(out);
+        sock.getOutputStream().flush();
+
+        if (dock) handler.post(new Runnable() { @Override public void run() { dockToEdge(); } });
+        else handler.post(new Runnable() { @Override public void run() { updateEngineStatusUi(); } });
+    }
+
+    /** 解析上报负载。既支持 JSON（{...}），也支持 GET 的 query（?state=working&step=2）。 */
+    private void applyStatusPayload(String body, String path) {
+        String src = body;
+        int q = path.indexOf('?');
+        if (q >= 0 && (src == null || src.trim().length() == 0)) src = path.substring(q + 1);
+        if (src == null) src = "";
+        src = src.trim();
+        if (src.startsWith("{")) {
+            taskState = strField(src, "state", taskState);
+            stepIndex = intField(src, "index", stepIndex);
+            stepTotal = intField(src, "total", stepTotal);
+            stepText  = strField(src, "step", stepText);
+            stepEta   = strField(src, "eta", stepEta);
+            String ex  = strField(src, "extra", null);
+            if (ex != null) stepExtra = ex;
+        } else {
+            for (String kv : src.split("&")) {
+                int i = kv.indexOf('=');
+                if (i <= 0) continue;
+                String k = kv.substring(0, i).trim();
+                String v;
+                try { v = java.net.URLDecoder.decode(kv.substring(i + 1), "UTF-8"); } catch (Throwable t) { v = kv.substring(i + 1); }
+                if ("state".equals(k)) taskState = v;
+                else if ("index".equals(k)) { try { stepIndex = Integer.parseInt(v.trim()); } catch (Throwable ignored) {} }
+                else if ("total".equals(k)) { try { stepTotal = Integer.parseInt(v.trim()); } catch (Throwable ignored) {} }
+                else if ("step".equals(k)) stepText = v;
+                else if ("eta".equals(k)) stepEta = v;
+                else if ("extra".equals(k)) stepExtra = v;
+            }
+        }
+        stateAt = System.currentTimeMillis();
+    }
+
+    /** 从 JSON 文本里取字符串字段（够用的土办法，不引 JSON 库）。 */
+    private String strField(String json, String key, String def) {
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("\"" + key + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").matcher(json);
+            if (m.find()) {
+                String v = m.group(1);
+                return v.replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\");
+            }
+        } catch (Throwable ignored) {}
+        return def;
+    }
+
+    private int intField(String json, String key, int def) {
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("\"" + key + "\"\\s*:\\s*(-?\\d+)").matcher(json);
+            if (m.find()) return Integer.parseInt(m.group(1));
+        } catch (Throwable ignored) {}
+        return def;
+    }
+
     /** 上次扫描是否看到过工作中的会话（用于"已完成"的边沿触发）。 */
     private volatile boolean lastSessionsHadWork = false;
 
