@@ -167,6 +167,8 @@ public class MainActivity extends Activity {
     private boolean consoleVisible = false;
     private boolean consoleDetailOpen = false;      //「已解压」那一行是否展开
     private boolean extracting = false;            // 正在解压（控制台进度）
+    /** v1.18：上一次渲染时队首的屏幕授权申请 id —— 变了才重建控制台（卡片出现/消失）。 */
+    private String lastScreenReqId = "";
     private boolean extractOnlyMode = false;       // true：本次只解压，不起引擎
     private boolean filesPreparedThisBoot = false; // 本进程内文件已就绪 → 跳过重复解压
     private volatile boolean starting = false;      // 引擎启动中（跨线程读写：启动流程在后台线程、刷新在主线程）
@@ -4592,6 +4594,70 @@ public class MainActivity extends Activity {
 
     private void renderConsoleMain() {
         LinearLayout col = consoleBody;
+
+        // ⚠ v1.18 屏幕占用授权卡片 —— AI 要抢前台时在这里问用户。
+        // 放在最上面：这是唯一需要用户立刻做决定的东西，别埋在下面。
+        try {
+            final OverlayService.ScreenRequest sreq = OverlayService.pendingScreenRequest();
+            if (sreq != null) {
+                LinearLayout card = new LinearLayout(this);
+                card.setOrientation(LinearLayout.VERTICAL);
+                card.setBackground(cShape(cTrack(), Color.parseColor("#FF3B30"), 2, 12));
+                card.setPadding(dp(14), dp(12), dp(14), dp(12));
+
+                card.addView(cText("⚠ 我需要占用屏幕", 16f, Color.parseColor("#FF3B30"), true));
+                card.addView(cText("做什么：" + sreq.what, 13f, cText(), false), cTop(dp(8)));
+                if (sreq.why != null && sreq.why.length() > 0) {
+                    card.addView(cText("为什么：" + sreq.why, 12f, cSub(), false), cTop(dp(4)));
+                }
+                if (sreq.eta != null && sreq.eta.length() > 0) {
+                    card.addView(cText("大约要：" + sreq.eta, 12f, cSub(), false), cTop(dp(4)));
+                }
+                boolean busy = OverlayService.isUserUsingPhone(MainActivity.this);
+                card.addView(cText(busy
+                        ? "检测到你正在用手机 → 所以我停下来问你"
+                        : "你现在没在用手机，可以直接让我做", 11f, cSub(), false), cTop(dp(8)));
+
+                LinearLayout acts = new LinearLayout(this);
+                acts.setOrientation(LinearLayout.HORIZONTAL);
+                Button okBtn = cButton("让给你", true);
+                okBtn.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        OverlayService.resolveScreenRequest(sreq.id, "allowed");
+                        renderConsole();
+                    }
+                });
+                acts.addView(okBtn, new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                Button mineBtn = cButton("我自己去做", false);
+                mineBtn.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        OverlayService.resolveScreenRequest(sreq.id, "self");
+                        // 把要用的东西（下载链接等）放进剪贴板，用户切到迅雷粘贴即可
+                        try {
+                            if (sreq.payload != null && sreq.payload.length() > 0) {
+                                android.content.ClipboardManager cm =
+                                        (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                                if (cm != null) {
+                                    cm.setPrimaryClip(android.content.ClipData.newPlainText("dsh", sreq.payload));
+                                    conToast("已复制到剪贴板，切到迅雷粘贴即可");
+                                }
+                            }
+                        } catch (Throwable ignored) {}
+                        renderConsole();
+                    }
+                });
+                LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                mlp.leftMargin = dp(8);
+                acts.addView(mineBtn, mlp);
+                card.addView(acts, cTop(dp(12)));
+
+                col.addView(card);
+                col.addView(cSep(dp(18)));
+            }
+        } catch (Throwable ignored) {}
+
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setGravity(Gravity.BOTTOM);
@@ -4910,6 +4976,19 @@ public class MainActivity extends Activity {
     }
 
     private void refreshConsole() {
+        // v1.18：屏幕授权申请来了或走了 → 重建控制台（上面那张卡片要出现/消失）。
+        // 正常刷新只改字段、不重建视图，所以这里单独探测一次。
+        try {
+            String rid = OverlayService.pendingScreenRequestId();
+            if (rid == null) rid = "";
+            if (!rid.equals(lastScreenReqId)) {
+                lastScreenReqId = rid;
+                if (consoleVisible && consoleBody != null && consolePage == 0) {
+                    renderConsole();
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {}
         if (!consoleVisible || consoleBody == null || consolePage != 0) return;
         boolean ready = conFilesReady();
         if (conExState != null) conExState.setText(extracting ? "正在解压…" : (ready ? "已解压" : "未解压"));
