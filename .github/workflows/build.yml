@@ -216,7 +216,8 @@ jobs:
               captionLabel applyCaption applySideAlignment \
               startStatusServer stopStatusServer handleStatusHit applyStatusPayload \
               effectiveState stepsPanelText \
-              submitScreenRequest pendingScreenRequest resolveScreenRequest isUserUsingPhone ; do
+              submitScreenRequest pendingScreenRequest resolveScreenRequest isUserUsingPhone \
+              maybeHoldScreen releaseScreenNow isScreenGrab ; do
             if grep -aq "$sym" "$T"/classes*.dex 2>/dev/null; then
               printf "   ✅ %s\n" "$sym"
             else
@@ -228,7 +229,7 @@ jobs:
 
           echo "── 4) 状态服务端点字符串 ──"
           T=$(mktemp -d); unzip -o -q "$APK" 'classes*.dex' -d "$T"
-          for s in "/overlay-status" "/overlay-dock" "/overlay-ping" "/screen-request" ; do
+          for s in "/overlay-status" "/overlay-dock" "/overlay-ping" "/screen-request" "/screen-release" ; do
             if grep -aq "$s" "$T"/classes*.dex 2>/dev/null; then printf "   ✅ %s\n" "$s"; else printf "   ❌ %s 缺失\n" "$s"; MISS=1; fi
           done
           rm -rf "$T"
