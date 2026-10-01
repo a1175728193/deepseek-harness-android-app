@@ -19,10 +19,6 @@ on:
         description: '抽取 payload 用的官方 release tag'
         required: true
         default: 'v1.15.2'
-      slim:
-        description: '瘦身构建（不打包 payload.zip，APK 约 10MB）'
-        required: true
-        default: 'false'
 
 jobs:
   build:
