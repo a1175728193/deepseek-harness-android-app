@@ -1082,10 +1082,13 @@ public class OverlayService extends Service {
         // v1.18：有待授权的屏幕请求时，红灯盖过一切（这是最需要用户注意的事）
         if (pendingScreenRequest() != null) return "need";
         String st = taskState;
+        // 从未上报过 → 返回空串 → 球保持图标原色（蓝）
         if (st == null || st.length() == 0) return "";
         long age = stateAt > 0L ? System.currentTimeMillis() - stateAt : 0L;
-        if ("done".equals(st) && age > DONE_TTL_MS) return "";   // 完成只亮 60 秒
-        if (age > STATE_TTL_MS) return "";
+        // v1.18.4 修：过期要返回 "idle"（灰），不能返回空串 —— 空串会让球变回原色蓝，
+        // 于是"完成 60 秒后变灰"这条永远不生效（用户实测发现：没有灰色，是本来的蓝色）。
+        if ("done".equals(st) && age > DONE_TTL_MS) return "idle";   // 完成亮 60 秒 → 灰
+        if (age > STATE_TTL_MS) return "idle";                        // 太久没更新 → 灰
         return st;
     }
 
