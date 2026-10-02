@@ -104,6 +104,13 @@ jobs:
           # ShizukuProvider 同理）——不改会和自己对不上，还会和 official 版冲突装不上
           sed -i 's|android:authorities="com\.deepseek\.harness\.|android:authorities="com.deepseek.harness.compat.|g' AndroidManifest.xml
           sed -i 's|android:versionName="\([^"]*\)"|android:versionName="\1-compat"|' AndroidManifest.xml
+          # ★ Java 包名也要改：只改 manifest 的话，Service/Provider 组件名会对不上
+          #   （dumpsys 会显示 com.deepseek.harness.compat/.AccessibilityService，
+          #    但 dex 里只有 com.deepseek.harness.AccessibilityService → 装上就坏）
+          find src -name '*.java' -exec sed -i 's|^package com\.deepseek\.harness;|package com.deepseek.harness.compat;|' {} +
+          find src -name '*.java' -exec sed -i 's|^package com\.deepseek\.harness\.vscreen;|package com.deepseek.harness.compat.vscreen;|' {} +
+          find src -name '*.java' -exec sed -i 's|com\.deepseek\.harness\.vscreen|com.deepseek.harness.compat.vscreen|g' {} +
+          echo "  Java 包名已改："; find src -name '*.java' -exec grep -h '^package ' {} + | sort -u | sed 's/^/    /'
           echo '--- 改完的 manifest ---'
           grep -nE 'package=|versionName' AndroidManifest.xml | head -4
 
@@ -123,7 +130,10 @@ jobs:
           mkdir -p out/gen out/classes out/dex assets
 
           echo "== 1/7 资源编译 (aapt) =="
-          aapt package -f -m --custom-package com.deepseek.harness -J out/gen -M AndroidManifest.xml -S res -I "$AJ"
+          # R 的包名跟着 manifest 走（official=com.deepseek.harness，compat=...compat）
+          RP=$(sed -n 's/.*package="\([^"]*\)".*/\1/p' AndroidManifest.xml | head -1)
+          echo "  R 包名: $RP"
+          aapt package -f -m --custom-package "$RP" -J out/gen -M AndroidManifest.xml -S res -I "$AJ"
           ls out/gen/com/deepseek/harness/
 
           echo "== 2/7 javac =="
@@ -226,6 +236,18 @@ jobs:
           done
           rm -rf "$T"
           if [ "$MISS" != "0" ]; then echo "   ❌ 有关键方法缺失"; exit 1; fi
+
+          echo "── 3.5) 服务类名必须和包名一致（v1.18.5 加：防 compat 变体装了坏包）──"
+          T=$(mktemp -d); unzip -o -q "$APK" 'classes*.dex' -d "$T"
+          SVC=$(echo "$PKG" | tr '.' '/')/AccessibilityService
+          if grep -aq "L$SVC;" "$T"/classes*.dex 2>/dev/null; then
+            echo "   ✅ dex 里有 L$SVC;"
+          else
+            echo "   ❌ dex 里没有 L$SVC; —— 包名改了但 Java 包名没跟着改，装上会坏"
+            grep -ao 'Lcom/deepseek/harness[A-Za-z/]*AccessibilityService;' "$T"/classes*.dex | sort -u | head -3 | sed 's/^/      实际有: /'
+            rm -rf "$T"; exit 1
+          fi
+          rm -rf "$T"
 
           echo "── 4) 状态服务端点字符串 ──"
           T=$(mktemp -d); unzip -o -q "$APK" 'classes*.dex' -d "$T"
