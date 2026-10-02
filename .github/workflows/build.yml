@@ -229,7 +229,7 @@ jobs:
               effectiveState stepsPanelText \
               submitScreenRequest pendingScreenRequest resolveScreenRequest isUserUsingPhone \
               maybeHoldScreen releaseScreenNow isScreenGrab taskIdOf \
-              conOneClickRestore moveReviveWorkspace ; do
+              conOneClickRestore moveReviveWorkspace ensureOverlayWatcher stopOverlayWatcher ; do
             if grep -aq "$sym" "$T"/classes*.dex 2>/dev/null; then
               printf "   ✅ %s\n" "$sym"
             else
@@ -250,6 +250,14 @@ jobs:
             rm -rf "$T"; exit 1
           fi
           rm -rf "$T"
+
+          echo "── 3.6) 悬浮球状态推送器（脚本资源 + 代码）──"
+          if unzip -l "$APK" 2>/dev/null | grep -qE 'res/raw/overlay_watch'; then
+            echo "   ✅ APK 里有 res/raw/overlay_watch"
+          else
+            echo "   ❌ APK 里没有 overlay_watch 资源 —— 推送器脚本没打进包"
+            exit 1
+          fi
 
           echo "── 4) 状态服务端点字符串 ──"
           T=$(mktemp -d); unzip -o -q "$APK" 'classes*.dex' -d "$T"
