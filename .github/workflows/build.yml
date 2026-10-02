@@ -132,7 +132,7 @@ jobs:
           echo "== 1/7 资源编译 (aapt) =="
           # R 的包名跟着 manifest 走（official=com.deepseek.harness，compat=...compat）
           RP=$(sed -n 's/.*package="\([^"]*\)".*/\1/p' AndroidManifest.xml | head -1)
-         RPD=$(echo "$RP" | tr '.' '/')
+          RPD=$(echo "$RP" | tr '.' '/')
           echo "  R 包名: $RP   （目录: out/gen/$RPD）"
           aapt package -f -m --custom-package "$RP" -J out/gen -M AndroidManifest.xml -S res -I "$AJ"
           ls "out/gen/$RPD/"
