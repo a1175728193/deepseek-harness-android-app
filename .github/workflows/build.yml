@@ -132,9 +132,10 @@ jobs:
           echo "== 1/7 资源编译 (aapt) =="
           # R 的包名跟着 manifest 走（official=com.deepseek.harness，compat=...compat）
           RP=$(sed -n 's/.*package="\([^"]*\)".*/\1/p' AndroidManifest.xml | head -1)
-          echo "  R 包名: $RP"
+         RPD=$(echo "$RP" | tr '.' '/')
+          echo "  R 包名: $RP   （目录: out/gen/$RPD）"
           aapt package -f -m --custom-package "$RP" -J out/gen -M AndroidManifest.xml -S res -I "$AJ"
-          ls out/gen/com/deepseek/harness/
+          ls "out/gen/$RPD/"
 
           echo "== 2/7 javac =="
           SHIZUKU_CLS="$P/out/shizuku-cls"
@@ -158,7 +159,7 @@ jobs:
             src/com/deepseek/harness/VsreenBridgeService.java \
             src/com/deepseek/harness/LogShareProvider.java \
             src/com/deepseek/harness/vscreen/*.java \
-            out/gen/com/deepseek/harness/R.java
+            "out/gen/$RPD/R.java"
           NCLASS="$(find "$P/out/classes" -name '*.class' | wc -l)"
           echo "  javac 完成，class 数：$NCLASS"
           [ "$NCLASS" -gt 0 ] || { echo "!! javac 产物为空"; exit 1; }
