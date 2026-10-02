@@ -2551,8 +2551,12 @@ public class MainActivity extends Activity {
     private String taskIdOf(String pkg) {
         try {
             if (pkg == null || pkg.isEmpty()) return null;
+            // v1.18.3 修：原来用 grep -m1 "<pkg>" 会串包 ——
+            // "com.deepseek.harness" 会先匹配到 "com.deepseek.harness.compat" 那一行，
+            // 导致还屏把用户送到错误的 App（实测：查 official 拿到的是 compat 的 taskId）。
+            // 改成锚定 A=<uid>:<pkg> 且包名后必须跟空格或 }。
             String r = shellViaShizuku(
-                    "dumpsys activity activities | grep -m1 '" + pkg + "' | grep -oE '#[0-9]+' | tr -d '#' | head -1",
+                    "dumpsys activity activities | grep -m1 'A=[0-9]*:" + pkg + "[ }]' | grep -oE '#[0-9]+' | tr -d '#' | head -1",
                     8000);
             String out = jsonField(r, "stdout");
             if (out != null) {
