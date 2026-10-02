@@ -4924,6 +4924,13 @@ public class MainActivity extends Activity {
         });
         col.addView(impBtn, cTop(dp(8)));
 
+        // v1.18.6 一键导入：复活包放在固定位置，点一下就好，不用走文件选择器
+        Button oneClickBtn = cButton("一键导入（巨鲸复活包）", true);
+        oneClickBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conOneClickRestore(); }
+        });
+        col.addView(oneClickBtn, cTop(dp(8)));
+
         // ③ 三个入口
         col.addView(cSep(dp(20)));
         col.addView(cNavRow("授予权限", "存储 · 通知 · 悬浮窗 · 电池 · root · Shizuku · 无障碍", conPermSummary(), 1));
@@ -6560,6 +6567,71 @@ public class MainActivity extends Activity {
         } catch (Throwable t) { return false; }
     }
 
+    /** 复活包固定位置：/sdcard/巨鲸复活包/ */
+    private static final String REVIVE_DIR_NAME = "巨鲸复活包";
+
+    /**
+     * v1.18.6 一键导入。
+     * 用户场景：App 数据丢了 / 被卸载重装了 —— 只要复活包还在，
+     * 点这一个按钮就能把「巨鲸」整个恢复回来，不用去文件选择器里翻。
+     */
+    private void conOneClickRestore() {
+        File dir = new File(Environment.getExternalStorageDirectory(), REVIVE_DIR_NAME);
+        File zip = null;
+        File[] kids = dir.listFiles();
+        if (kids != null) {
+            for (File f : kids) {
+                if (f.isFile() && f.getName().toLowerCase().endsWith(".zip")) { zip = f; break; }
+            }
+        }
+        if (zip == null) {
+            conDialog("没找到复活包",
+                    "应该在下面这个位置放一个 .zip：\n\n" + dir.getAbsolutePath()
+                            + "\n\n如果你有别的备份文件，也可以用「从备份导入还原」自己选。",
+                    "知道了", new Runnable() { @Override public void run() {} }, "关闭");
+            return;
+        }
+        final File z = zip;
+        long mb = z.length() / 1048576L;
+        conDialog("一键导入",
+                "将从复活包恢复全部数据：\n\n"
+                        + "    " + z.getName() + "（" + mb + " MB）\n\n"
+                        + "包含：会话 / API Key / 技能 / 附件 / 设置 / 插件配置 / 工作区\n\n"
+                        + "当前同名数据会被覆盖；复活包本身不动。\n"
+                        + "导入完会自动重启引擎。开始吗？",
+                "开始导入",
+                new Runnable() { @Override public void run() {
+                    try { conImportNow(Uri.fromFile(z)); }
+                    catch (Throwable t) { conToast("导入失败：" + t.getMessage()); }
+                } },
+                "取消");
+    }
+
+    /**
+     * 复活包里的工作区先落在 dshhome/_REVIVE_WORKSPACE（App 的导入接口只认 dshhome/ 下的路径），
+     * 导入完在这里把它挪到正确位置 files/DSH-Workspace。
+     */
+    private void moveReviveWorkspace() {
+        try {
+            File home = new File(payloadDir(), "dshhome");
+            File src = new File(home, "_REVIVE_WORKSPACE");
+            if (!src.exists()) return;
+            File dst = new File(getFilesDir(), "DSH-Workspace");
+            if (dst.exists()) {
+                File old = new File(home, "_REVIVE_WORKSPACE_旧");
+                backupDeleteRec(old);
+                if (!dst.renameTo(old)) { backupCopyRec(dst, old); backupDeleteRec(dst); }
+            }
+            if (!src.renameTo(dst)) {
+                backupCopyRec(src, dst);
+                backupDeleteRec(src);
+            }
+            Log.i(TAG, "revive workspace -> " + dst.getAbsolutePath());
+        } catch (Throwable t) {
+            Log.w(TAG, "moveReviveWorkspace failed", t);
+        }
+    }
+
     private void conBackupImport() {
         try {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -6589,6 +6661,7 @@ public class MainActivity extends Activity {
                     try { Thread.sleep(200); } catch (InterruptedException ignored) {}
                 }
                 files = readBackupZip(uri);
+                moveReviveWorkspace();          // v1.18.6：把复活包里的工作区摆正
                 err = null;
             } catch (Throwable t) {
                 Log.e(TAG, "backup import", t);
