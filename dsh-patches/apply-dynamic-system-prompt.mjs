@@ -44,7 +44,8 @@ if (!src.includes(SYSTEM_OLD)) {
 }
 
 const HELPER = `
-/** ${MARK}
+/**
+ * ${MARK}
  * 动态系统提示词读取：优先 DSH_SYSTEM_PROMPT_FILE，其次 DSH_WORKSPACE/system_prompt.txt。
  * 文件不存在、读取失败或内容为空 → 返回 null，由调用方保留内核原始提示词。
  * 只替换系统提示词文本，不触碰 messages 里的工具调用、工具结果与上下文压缩逻辑。
