@@ -4051,6 +4051,26 @@ public class MainActivity extends Activity {
         // AI 工作区（可选）：用户选择的外部共享存储目录，作为 bash/文件工具的工作根目录
         String ws = workspacePath();
         if (ws != null && !ws.isEmpty()) env.put("DSH_WORKSPACE", ws);
+        // v1.19 动态系统提示词：APK assets/system_prompt.txt 作为默认值首次落到工作区；
+        // 之后用户直接改工作区 system_prompt.txt（或替换 assets 后重装 APK）即可，重启 App 生效。
+        // 内核侧由 dsh-patches/apply-dynamic-system-prompt.mjs 补丁在请求出口读取本文件替换 system 字段。
+        try {
+            if (ws != null && !ws.isEmpty()) {
+                File sp = new File(ws, "system_prompt.txt");
+                if (!sp.isFile()) {
+                    java.io.InputStream is = getAssets().open("system_prompt.txt");
+                    java.io.FileOutputStream os = new java.io.FileOutputStream(sp);
+                    byte[] spBuf = new byte[8192];
+                    int spN;
+                    while ((spN = is.read(spBuf)) > 0) os.write(spBuf, 0, spN);
+                    os.close();
+                    is.close();
+                }
+                env.put("DSH_SYSTEM_PROMPT_FILE", sp.getAbsolutePath());
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "dynamic system prompt init failed: " + t);
+        }
         pb.redirectErrorStream(true);
 
         final Process proc = pb.start();

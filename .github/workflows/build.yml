@@ -73,6 +73,13 @@ jobs:
           echo "--- staging 顶层 ---"; ls -la android-app/staging
           du -sh android-app/staging
 
+      - name: 应用动态系统提示词补丁（dsh-llm-deepseek 请求出口拦截）
+        run: |
+          set -e
+          node dsh-patches/apply-dynamic-system-prompt.mjs android-app/staging/dshroot/lib
+          node --check android-app/staging/dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js
+          echo "✅ 动态系统提示词补丁已应用"
+
       - name: 取回已有 keystore
         id: kscache
         uses: actions/cache@v4
