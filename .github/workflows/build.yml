@@ -80,6 +80,15 @@ jobs:
           node --check android-app/staging/dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js
           echo "✅ 动态系统提示词补丁已应用"
 
+      - name: 打补丁（聊天模式：零工具 preset）
+        run: |
+          set -e
+          node dsh-patches/apply-chat-preset.mjs android-app/staging/dshroot/lib
+          W="android-app/staging/dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-app"
+          grep -q "id: chat" "$W/presets/chat.patch.yml"
+          grep -q "presets/chat.patch.yml" "$W/package.json"
+          echo "✅ 聊天模式预设已写入并登记"
+
       - name: 取回已有 keystore
         id: kscache
         uses: actions/cache@v4
