@@ -115,6 +115,10 @@ public class MainActivity extends Activity {
         "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/",
         "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/",
         "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-accessibility/",
+        // v1.19 聊天模式：预设随 APK 走。web-app 是内置四个预设（标准/PTC/极简/创造）的所在，
+        // 新增的「聊天模式」预设也在这个包里 —— 不加进白名单的话，同内核升级走快速同步时
+        // 会跳过整个 dsh-web-app，新预设文件永远落不到设备上（预设列表里看不到这个模式）。
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-app/",
         // v1.3.x 核心 UI 改动（侧栏改造/插件按钮）必须随 APK 覆盖：
         // 否则旧版升级用户的外部 dshroot 保留旧 client.js → 页面仍是旧 UI（无竖屏适配）
         "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-layout/lib/client.js",
