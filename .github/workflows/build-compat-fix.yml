@@ -32,6 +32,7 @@ jobs:
           BT="$(ls "$SDK/build-tools" | sort -V | tail -1)"
           PLAT="$(ls "$SDK/platforms" | sort -V | tail -1)"
           echo "bt=$BT plat=$PLAT"
+          export PATH="$SDK/build-tools/$BT:$PATH"
           echo "$SDK/build-tools/$BT" >> "$GITHUB_PATH"
           echo "ANDROID_JAR=$SDK/platforms/$PLAT/android.jar" >> "$GITHUB_ENV"
           for t in aapt zipalign apksigner d8; do command -v "$t" >/dev/null || { echo "缺少 $t"; exit 1; }; done
