@@ -1308,14 +1308,14 @@ public class OverlayService extends Service {
                 statusServer = new java.net.ServerSocket();
                 statusServer.setReuseAddress(true);
                 statusServer.bind(new java.net.InetSocketAddress("127.0.0.1", port));
-                Log.i(TAG, "overlay status server on 127.0.0.1:" + port);
+                android.util.Log.i("DeepSeekHarness", "overlay status server on 127.0.0.1:" + port);
                 while (statusServerRunning && statusServer != null && !statusServer.isClosed()) {
                     java.net.Socket s = statusServer.accept();
                     try { handleStatusHit(s); } catch (Throwable ignored) {}
                     try { s.close(); } catch (Throwable ignored) {}
                 }
             } catch (Throwable t) {
-                Log.w(TAG, "overlay status server stopped: " + t.getMessage());
+                android.util.Log.w("DeepSeekHarness", "overlay status server stopped: " + t.getMessage());
             }
             statusServerRunning = false;
         }}, "overlay-status").start();
@@ -1382,7 +1382,7 @@ public class OverlayService extends Service {
         sock.getOutputStream().write(out);
         sock.getOutputStream().flush();
 
-        if (dock) handler.post(new Runnable() { @Override public void run() { dockToEdge(); } });
+        if (dock) handler.post(new Runnable() { @Override public void run() { snapToEdge(); } });
         else handler.post(new Runnable() { @Override public void run() { updateEngineStatusUi(); } });
     }
 

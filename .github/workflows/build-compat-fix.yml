@@ -71,7 +71,7 @@ jobs:
 
       - name: javac
         run: |
-          set -e
+          set -eo pipefail
           A="$PWD/android-app"; O="$PWD/out"; SH="$O/shizuku"; mkdir -p "$SH"
           for AAR in "$A"/libs/shizuku-api.aar "$A"/libs/shizuku-provider.aar "$A"/libs/shizuku-aidl.aar; do
             t="$O/$(basename "$AAR" .aar)"; rm -rf "$t"; mkdir -p "$t"
@@ -89,6 +89,7 @@ jobs:
           find "$O/classes" -name 'R.class' -delete
           find "$O/classes" -name 'R$*.class' -delete
           echo "删掉 R 之后：$(find "$O/classes" -name '*.class' | wc -l)"
+          [ -f "$O/classes/com/deepseek/harness/compat/OverlayService.class" ] || { echo "!! OverlayService 没编出来"; exit 1; }
 
       - name: d8
         run: |
