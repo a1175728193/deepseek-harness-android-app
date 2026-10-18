@@ -1,0 +1,138 @@
+name: build-compat-fix
+
+# 说明：仓库里没有兼容版（GeckoView）的完整源码树——compat/build.sh 依赖开发树里的
+#   src/com/deepseek/harness/compat/ 一整套（ConsoleTheme/EngineService/SessionHeal…），
+#   仓库只提交了 MainActivity.java。所以这里不重编整个 APK，而是：
+#     1) 用官方那套源码「改包名」补齐 compat 需要的兄弟类
+#     2) 只编译这些 Java 类 -> 一个新 classes.dex
+#     3) 把官方 v1.20.1 兼容版 APK 里的原 classes.dex 降级成 classes2.dex，新 dex 顶上去
+#   好处：GeckoView / omni.ja / 原生库 / payload.zip 全部原样保留，不用碰 GeckoView 构建链。
+
+on:
+  workflow_dispatch:
+
+env:
+  GV_VER: 158.0.20261007201254
+  OFFICIAL_APK: https://github.com/woaiys3/deepseek-harness-android-app/releases/download/v1.20.1/DeepSeekHarnessCompat.apk
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android 工具
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          BT="$(ls "$SDK/build-tools" | sort -V | tail -1)"
+          PLAT="$(ls "$SDK/platforms" | sort -V | tail -1)"
+          echo "bt=$BT plat=$PLAT"
+          echo "$SDK/build-tools/$BT" >> "$GITHUB_PATH"
+          echo "ANDROID_JAR=$SDK/platforms/$PLAT/android.jar" >> "$GITHUB_ENV"
+          for t in aapt zipalign apksigner d8; do command -v "$t" >/dev/null || { echo "缺少 $t"; exit 1; }; done
+
+      - name: GeckoView classes.jar（只用于 javac 编译期）
+        run: |
+          set -e
+          curl -fSL --retry 3 -o /tmp/gv.aar "https://maven.mozilla.org/maven2/org/mozilla/geckoview/geckoview-omni/${GV_VER}/geckoview-omni-${GV_VER}.aar"
+          mkdir -p /tmp/gv && cd /tmp/gv && unzip -o -q /tmp/gv.aar classes.jar
+          ls -l /tmp/gv/classes.jar
+
+      - name: 组装 compat 源码集
+        run: |
+          set -e
+          A="$PWD/android-app"; O="$PWD/out"
+          rm -rf "$O"; mkdir -p "$O/src/com/deepseek/harness/compat/vscreen" "$O/gen" "$O/classes" "$O/dex" "$O/res"
+          for f in "$A"/src/com/deepseek/harness/*.java; do
+            b="$(basename "$f")"
+            [ "$b" = "MainActivity.java" ] && continue
+            sed 's/^package com\.deepseek\.harness;/package com.deepseek.harness.compat;/' "$f" > "$O/src/com/deepseek/harness/compat/$b"
+          done
+          for f in "$A"/src/com/deepseek/harness/vscreen/*.java; do
+            b="$(basename "$f")"
+            sed 's/^package com\.deepseek\.harness\.vscreen;/package com.deepseek.harness.compat.vscreen;/' "$f" > "$O/src/com/deepseek/harness/compat/vscreen/$b"
+          done
+          cp "$A/compat/MainActivity.java" "$O/src/com/deepseek/harness/compat/MainActivity.java"
+          cp -r "$A/res/." "$O/res/"
+          cp -r "$A/compat/res/." "$O/res/"
+          echo "compat 类数：$(ls "$O/src/com/deepseek/harness/compat" | wc -l)（含 vscene 目录）"
+
+      - name: 生成 R
+        run: |
+          set -e
+          aapt package -f -m -J "$PWD/out/gen" -M "$PWD/android-app/compat/AndroidManifest.xml" -S "$PWD/out/res" -I "$ANDROID_JAR"
+          find "$PWD/out/gen" -name 'R.java'
+
+      - name: javac
+        run: |
+          set -e
+          A="$PWD/android-app"; O="$PWD/out"; SH="$O/shizuku"; mkdir -p "$SH"
+          for AAR in "$A"/libs/shizuku-api.aar "$A"/libs/shizuku-provider.aar "$A"/libs/shizuku-aidl.aar; do
+            t="$O/$(basename "$AAR" .aar)"; rm -rf "$t"; mkdir -p "$t"
+            ( cd "$t" && jar xf "$AAR" classes.jar )
+            ( cd "$SH" && jar xf "$t/classes.jar" )
+          done
+          CP="$O/gen:/tmp/gv/classes.jar:$O/shizuku-api/classes.jar:$O/shizuku-provider/classes.jar:$O/shizuku-aidl/classes.jar"
+          javac -source 1.8 -target 1.8 -nowarn -bootclasspath "$ANDROID_JAR" -classpath "$CP" -d "$O/classes" \
+            $(find "$O/src" -name '*.java') $(find "$O/gen" -name 'R.java') 2>&1 | tail -40
+          N="$(find "$O/classes" -name '*.class' | wc -l)"
+          echo "class 数：$N"
+          [ "$N" -gt 0 ] || exit 1
+          # R 类故意不编进新 dex：运行时会从 classes2.dex 里取官方那份，
+          # 避免「我们 aapt 生成的资源 id」和「APK 里 resources.arsc 的 id」对不上。
+          find "$O/classes" -name 'R.class' -delete
+          find "$O/classes" -name 'R$*.class' -delete
+          echo "删掉 R 之后：$(find "$O/classes" -name '*.class' | wc -l)"
+
+      - name: d8
+        run: |
+          set -e
+          O="$PWD/out"
+          find "$O/classes" -name '*.class' > "$O/rsp.txt"
+          wc -l "$O/rsp.txt"
+          d8 --release --lib "$ANDROID_JAR" --min-api 26 --output "$O/dex" @"$O/rsp.txt"
+          ls -l "$O/dex"
+          grep -aq "MainActivity" "$O/dex/classes.dex" || { echo "dex 里没有 MainActivity"; exit 1; }
+
+      - name: 重打包官方 APK
+        run: |
+          set -e
+          O="$PWD/out"
+          curl -fSL --retry 5 --retry-all-errors -o /tmp/official.apk "$OFFICIAL_APK"
+          ls -l /tmp/official.apk
+          unzip -p /tmp/official.apk classes.dex > /tmp/classes2.dex
+          ls -l /tmp/classes2.dex
+          cp /tmp/official.apk "$O/app.apk"
+          cd "$O"
+          zip -q -d app.apk 'classes*.dex' || true
+          cp dex/classes.dex ./classes.dex
+          cp /tmp/classes2.dex ./classes2.dex
+          zip -q app.apk classes.dex classes2.dex
+          unzip -l app.apk | grep -E 'classes.*dex'
+
+      - name: 签名
+        run: |
+          set -e
+          O="$PWD/out"
+          KS="$RUNNER_TEMP/ks/release.jks"; mkdir -p "$RUNNER_TEMP/ks"
+          if [ ! -f "$KS" ]; then
+            keytool -genkeypair -keystore "$KS" -alias dsh -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass dshpass1234 -keypass dshpass1234 -dname "CN=DSH Fix, O=Self, C=CN"
+          fi
+          zipalign -f 4 "$O/app.apk" "$O/aligned.apk"
+          apksigner sign --ks "$KS" --ks-pass pass:dshpass1234 --ks-key-alias dsh --key-pass pass:dshpass1234 \
+            --out "$O/DeepSeekHarnessCompat-fix.apk" "$O/aligned.apk"
+          apksigner verify --print-certs "$O/DeepSeekHarnessCompat-fix.apk" | head -5
+          aapt dump badging "$O/DeepSeekHarnessCompat-fix.apk" | head -4
+          ls -l "$O/DeepSeekHarnessCompat-fix.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compat-fix-apk
+          path: out/DeepSeekHarnessCompat-fix.apk
+          if-no-files-found: error
